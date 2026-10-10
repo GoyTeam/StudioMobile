@@ -26,6 +26,10 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The old "tools" meta-package no longer exists in the SDK repository; asking for it
+          # makes the action fail. platform-tools is all we need from it here.
+          packages: 'platform-tools'
 
       - name: Install Android platform and build tools
         run: |
