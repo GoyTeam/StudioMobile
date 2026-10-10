@@ -1,0 +1,42 @@
+[
+  {
+    "filename": "okhttp-4.12.0.jar",
+    "source": "https://repo.maven.apache.org/maven2/com/squareup/okhttp3/okhttp/4.12.0/okhttp-4.12.0.jar",
+    "sha256": "b1050081b14bb7a3a7e55a4d3ef01b5dcfabc453b4573a4fc019767191d5f4e0"
+  },
+  {
+    "filename": "okio-jvm-3.6.0.jar",
+    "source": "https://repo.maven.apache.org/maven2/com/squareup/okio/okio-jvm/3.6.0/okio-jvm-3.6.0.jar",
+    "sha256": "67543f0736fc422ae927ed0e504b98bc5e269fda0d3500579337cb713da28412"
+  },
+  {
+    "filename": "kotlin-stdlib-1.8.21.jar",
+    "source": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/1.8.21/kotlin-stdlib-1.8.21.jar",
+    "sha256": "042a1cd1ac976cdcfe5eb63f1d8e0b0b892c9248e15a69c8cfba495d546ea52a"
+  },
+  {
+    "filename": "kotlin-stdlib-common-1.8.21.jar",
+    "source": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-common/1.8.21/kotlin-stdlib-common-1.8.21.jar",
+    "sha256": "6a44c9ecc9d7754d9e943fb1e3588c74d4a3f1785be51074f49d6c5723682a73"
+  },
+  {
+    "filename": "kotlin-stdlib-jdk8-1.8.21.jar",
+    "source": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/1.8.21/kotlin-stdlib-jdk8-1.8.21.jar",
+    "sha256": "3db752a30074f06ee6c57984aa6f27da44f4d2bbc7f5442651f6988f1cb2b7d7"
+  },
+  {
+    "filename": "kotlin-stdlib-jdk7-1.8.21.jar",
+    "source": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk7/1.8.21/kotlin-stdlib-jdk7-1.8.21.jar",
+    "sha256": "33d148db0e11debd0d90677d28242bced907f9c77730000fd597867089039d86"
+  },
+  {
+    "filename": "annotations-13.0.jar",
+    "source": "https://repo.maven.apache.org/maven2/org/jetbrains/annotations/13.0/annotations-13.0.jar",
+    "sha256": "ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478"
+  },
+  {
+    "filename": "snakeyaml-2.3.jar",
+    "source": "https://repo.maven.apache.org/maven2/org/yaml/snakeyaml/2.3/snakeyaml-2.3.jar",
+    "sha256": "63a76fe66b652360bd4c2c107e6f0258daa7d4bb492008ba8c26fcd230ff9146"
+  }
+]

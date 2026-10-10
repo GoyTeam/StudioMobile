@@ -1,0 +1,20 @@
+PASS: OkHttp networking dependency is bundled
+PASS: WebSocket foundation is bundled
+PASS: Palette switches to light
+PASS: Guide tab 0 renders in light
+PASS: Guide tab 1 renders in light
+PASS: Guide tab 2 renders in light
+PASS: Guide tab 3 renders in light
+PASS: Projects search renders real empty results in light
+PASS: Palette switches to dark
+PASS: Guide tab 0 renders in dark
+PASS: Guide tab 1 renders in dark
+PASS: Guide tab 2 renders in dark
+PASS: Guide tab 3 renders in dark
+PASS: Projects search renders real empty results in dark
+PASS: Bundled OkHttp transport receives actual Roblox invalid-key rejection
+PASS: Native transition finishes without obscuring content
+PASS: Reduce motion setting disables transitions
+DEVICE: Android 10 API 29
+CAPTURES: actual native app views, not mockups or live-account screenshots.
+NOT VERIFIED: valid creator-key sign-in, authorized place download, publishing/editor/collaboration features.

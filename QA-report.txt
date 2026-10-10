@@ -1,0 +1,33 @@
+Studio Mobile 0.2.0 - test build QA
+Device: Android 10 / API 29 emulator, native Java Views.
+Build: SDK 35.0.0, minimum API 26, target 35, JDK 17, test-signed.
+
+Core regression: 12 assertions passed.
+- Empty key rejected; actual Roblox HTTP 400 rejection creates no session.
+- Android Keystore encryption round-trip; persisted ciphertext not plaintext.
+- XML and binary place signature recognition; JSON errors rejected.
+- Granted legacy storage; real local import; scan discovers imported file.
+- Logout clears credential/session state and preserves local projects.
+Test fixtures were removed; no real creator credentials used.
+
+Redesign suite results are supplied separately in redesign-report.txt.
+- Both native palettes, four guide sections, actual empty search results.
+- OkHttp and WebSocket runtime classes actually bundled.
+- Actual HTTP invalid-key rejection through the bundled OkHttp JSON path.
+- Native entry transition completes; Reduce motion disables transitions.
+
+Screenshot method: actual laid-out app/dialog native View.draw to Bitmap;
+Android system bars/dialogs/emulator overlays are excluded. These are not
+full-device screenshots or proof that System UI never raises an ANR.
+No fake signed-in profile or populated cloud experience list is shown.
+Phone viewport: 1280 wide, 240 dpi, landscape. Long pages scroll.
+
+Not verified: successful live creator-key sign-in, profile/avatar with a live
+key, complete private/group discovery, live authorized place download,
+Android 11+ all-files settings, Android 13+ notification prompt, Android 15
+insets/rotation on physical hardware, production release/store readiness.
+The modern emulator failed to boot reliably; no modern-device pass claimed.
+OAuth, editor, publishing and collaboration are not implemented.
+This is not a penetration/security audit or a complete .rbxl parser.
+
+Redesign: 17 assertions passed on final APK. Native captures reviewed individually.

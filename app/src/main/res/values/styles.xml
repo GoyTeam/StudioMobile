@@ -1,0 +1,16 @@
+<resources>
+<style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+<item name="android:fontFamily">sans</item><item name="android:colorAccent">#335FFF</item>
+<item name="android:windowLightStatusBar">true</item><item name="android:statusBarColor">#FFFFFF</item><item name="android:navigationBarColor">#FFFFFF</item><item name="android:windowLightNavigationBar">true</item>
+<item name="android:windowActionModeOverlay">true</item><item name="android:windowSoftInputMode">adjustResize</item><item name="android:windowBackground">#FFFFFF</item><item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+<item name="android:textColorPrimary">#202329</item><item name="android:textColorSecondary">#5E6574</item>
+</style>
+<style name="AppThemeDark" parent="android:style/Theme.Material.NoActionBar">
+<item name="android:fontFamily">sans</item><item name="android:colorAccent">#8CA8FF</item>
+<item name="android:windowLightStatusBar">false</item><item name="android:statusBarColor">#141821</item><item name="android:navigationBarColor">#141821</item><item name="android:windowLightNavigationBar">false</item>
+<item name="android:windowActionModeOverlay">true</item><item name="android:windowSoftInputMode">adjustResize</item><item name="android:windowBackground">#141821</item><item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+<item name="android:textColorPrimary">#F4F6FC</item><item name="android:textColorSecondary">#AAB4C7</item><item name="android:colorBackground">#141821</item>
+</style>
+<style name="DialogLight" parent="android:style/Theme.Material.Light.Dialog.Alert"><item name="android:fontFamily">sans</item><item name="android:colorAccent">#335FFF</item></style>
+<style name="DialogDark" parent="android:style/Theme.Material.Dialog.Alert"><item name="android:fontFamily">sans</item><item name="android:colorAccent">#8CA8FF</item><item name="android:colorBackground">#1D2330</item><item name="android:textColorPrimary">#F4F6FC</item><item name="android:textColorSecondary">#AAB4C7</item></style>
+</resources>

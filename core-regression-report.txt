@@ -1,0 +1,17 @@
+INSTRUMENTATION_RESULT: report=PASS: Empty key does not authenticate
+PASS: Roblox rejects invalid key with HTTP 400 without creating a session
+PASS: Android Keystore round-trip succeeds
+PASS: Preferences contain ciphertext, not the API key
+PASS: XML place signature recognized
+PASS: Binary place signature recognized without claiming full format validation
+PASS: JSON error is not accepted as a place file
+PASS: Test device storage access granted
+PASS: Local import writes an actual place file
+PASS: Project scan finds imported place file
+PASS: Logout deletes credential material and session state
+PASS: Logout preserves local project files
+CAPTURES: actual native app views, excluding emulator-system windows; not simulated UI or live-account screenshots.
+DEVICE: Android 10 / API 29
+NOT VERIFIED: successful live-key connection, private/group permissions, live authorized download, Android 11+ all-files flow, Android 13+ notifications
+INSTRUMENTATION_RESULT: screenshots=/storage/emulated/0/Android/data/dev.falix.studiomobile/files/qa
+INSTRUMENTATION_CODE: -1

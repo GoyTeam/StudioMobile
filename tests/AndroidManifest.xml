@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.falix.studiomobile.qa">
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+  <application android:label="Studio Mobile QA" />
+  <instrumentation android:name="dev.falix.studiomobile.NativeQa" android:targetPackage="dev.falix.studiomobile" android:label="Native QA" />
+<instrumentation android:name="dev.falix.studiomobile.CaptureProjectQa" android:targetPackage="dev.falix.studiomobile" android:label="Project recapture" />
+<instrumentation android:name="dev.falix.studiomobile.RedesignQa" android:targetPackage="dev.falix.studiomobile" android:label="Appearance and guide QA" />
+<instrumentation android:name="dev.falix.studiomobile.ProjectQa" android:targetPackage="dev.falix.studiomobile" android:label="Real local project QA" />
+</manifest>

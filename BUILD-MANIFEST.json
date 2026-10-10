@@ -1,0 +1,39 @@
+{
+  "app": "Studio Mobile (Unofficial)",
+  "version": "0.4.0",
+  "versionCode": 4,
+  "package": "dev.falix.studiomobile",
+  "minSdk": 26,
+  "targetSdk": 35,
+  "type": "test-signed sideload build",
+  "apk_sha256": null,
+  "apk_sha256_note": "Computed by the GoyTeam GitHub Actions workflow and attached to the release artifact as StudioMobile-GoyTeam-v<version>.apk.sha256.",
+  "engine": {
+    "editor_present": true,
+    "decoder_xml_rbxlx": true,
+    "decoder_binary_rbxl": "LZ4 chunks (INST/PROP/PRNT/META); ZSTD chunks are detected and reported as unsupported",
+    "renderer": "OpenGL ES 2.0, box geometry, real size/CFrame/color",
+    "explorer_and_properties": true,
+    "playable_character_and_joystick": true,
+    "save_round_trips_xml": true,
+    "scripts_execute": false,
+    "assets_render": false,
+    "zstd_binary_supported": false
+  },
+  "verification": {
+    "engine_unit_tests": "app/src/test/java/dev/falix/studiomobile/EngineCoreTest.java (LZ4, cursor, CFrame, ray picking, character collision) - run with ./gradlew testDebugUnitTest",
+    "device_run_verified_for_this_version": false,
+    "live_valid_key_sign_in_verified": false,
+    "live_authorized_download_verified": false,
+    "live_save_publish_verified": false,
+    "desktop_studio_load_playtest_verified": false,
+    "modern_permission_flows_verified": false,
+    "SAF_provider_UI_verified": false
+  },
+  "screenshots": "Only real captures are accepted. Historical QA screenshots in this repository are native View.draw captures excluding system overlays. No fabricated cloud account or device run is claimed for 0.4.0.",
+  "ci": {
+    "workflow": ".github/workflows/goyteam-apk.yml",
+    "artifact": "StudioMobile-GoyTeam-v<version>.apk (+ .sha256)",
+    "signing": "CI debug keystore"
+  }
+}

@@ -1,0 +1,3 @@
+PASS independent decoder: Workspace + Baseplate Part + SpawnLocation
+serialized size	512, 8, 512
+anchored	true	gravity	float: 196.2
