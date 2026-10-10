@@ -88,7 +88,8 @@ jobs:
             **Always the newest debug build from `main`.**
 
             - Package: `dev.falix.studiomobile`
-            - Version: `${{ env.APK_VERSION }}` (versionCode increases every release)
+            - Version: `${{ env.APK_VERSION }}` — sideloading accepts a reinstall of the same version code;
+              bump `versionCode` in `app/build.gradle` when you want Android to treat a build as a formal upgrade
             - APK: `${{ env.APK_NAME }}.apk` (+ `.sha256`)
 
             Debug APKs are signed with the shared GoyTeam debug certificate that is committed in the

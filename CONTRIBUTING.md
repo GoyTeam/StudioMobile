@@ -151,6 +151,17 @@ Known gaps you intentionally left for another PR.
 Reviewers check exactly the "Evidence" and "Not verified" sections. Missing evidence means the PR
 will be asked to update before review continues.
 
+### Releasing a debug build
+
+- CI publishes `StudioMobile-GoyTeam-v<version>-debug.apk` on every run and refreshes the rolling
+  [debug-latest](https://github.com/GoyTeam/StudioMobile/releases/tag/debug-latest) prerelease from `main`.
+- Debug builds share the committed certificate (`keystore/debug.keystore`, alias `goyteam-debug`,
+  password `android`), so a new APK installs over an older GoyTeam build and keeps the user's data.
+- Bump `versionCode` (and usually `versionName`) in `app/build.gradle` for any build you want Android
+  to treat as a formal upgrade. Same-version reinstalls still work while sideloading.
+- Never replace the committed debug keystore, and never reuse it for a production or store release:
+  changing it forces every existing tester to uninstall.
+
 ## 6. Commit style
 
 - One logical change per commit; imperative subject ("Add LZ4 reader for binary places").
