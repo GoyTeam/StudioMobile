@@ -91,7 +91,7 @@ app/src/main/java/dev/falix/studiomobile/
   JoystickView.java        analog movement stick
   EngineActivity.java      editor UI: Explorer, Properties, tools, play mode, saving
 
-app/src/test/java/…        JVM tests for the engine core (LZ4, cursor, CFrame, ray, collision)
+app/src/test/java/…        JVM tests for the engine core (LZ4, binary arrays, CFrame, ray, collision)
 tests/                     on-device QA harness (adb) and its reports
 docs/ENGINE.md             engine internals, format coverage, extension points
 docs/AI-POLICY.md          the AI contribution policy in full detail

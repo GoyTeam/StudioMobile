@@ -49,20 +49,33 @@ A streaming SAX pass (works identically on device and in JVM unit tests):
 
 ### Binary (`.rbxl`)
 
-Chunk reader with LZ4 block decompression implemented in-file (`lz4()`):
+Chunk reader with in-file LZ4 block decompression (`lz4()`). The layout follows the published
+Roblox binary model format and was checked against the `rbx-dom` reference implementation:
 
-- Header `<roblox!` + signature bytes + version + class/instance counts.
-- `META` (string pairs), `INST` (class id, class name, object format, count, and **interleaved**
-  referents: four `u32` ids then four scope bytes), `PROP` (referent, name, type byte, then one
-  value per instance of that class in creation order), `PRNT` (child → parent pairs), `SIGN`/`END`
-  terminate.
-- Value types supported: string, bool, int32, float32, float64, BrickColor, Color3, Vector3, CFrame
-  (rotation matrix then position), enum, Color3uint8, int64, ProtectedString and the fixed-size
-  skippable geometry types (UDim, UDim2, Ray, Faces, Axes, Vector2, Vector2int16, Quaternion,
-  Vector3int16, NumberSequence, ColorSequence, NumberRange, Rect, PhysicalProperties,
-  OptionalCFrame). Unknown types abort with a clear message instead of corrupting the tree.
-- **ZSTD** post-compression is detected and reported ("save as .rbxlx or wait for the ZSTD reader")
-  rather than half-decoded.
+- **32-byte file header**: `<roblox!` magic, six signature bytes, little-endian `u16` version,
+  class count, instance count, and 8 reserved zero bytes.
+- **16-byte chunk headers**: 4-byte name, compressed length, uncompressed length, 4 reserved bytes.
+  Compression is chosen per chunk from the payload itself: LZ4 block form is decoded here, and ZSTD
+  is detected by its `28 B5 2F FD` magic and reported ("save as .rbxlx") rather than half-decoded.
+- Chunks: `META` (key/value string pairs), `SSTR` (version, count, then a 16-byte hash plus a string
+  per entry), `INST` (class id, class name, object format, count, then the referent array), `PROP`
+  (class id, property name, type byte, then one value per instance of that class in INST order; a
+  chunk that ends right after the name is ignored, exactly as Roblox does), `PRNT` (version, count,
+  child referents, parent referents — a parent of `-1` means a child of the DataModel), and
+  `END`/`SIGN` which terminate.
+- Numeric values use **structure-of-arrays planes**: each component occupies its own run of `count`
+  bytes and every 32/64-bit component is big-endian. `Int32`, `Enum` and referents are zig-zag
+  transformed, `Float32` bit patterns are rotated one bit, referents are difference-encoded (each
+  value accumulates onto the previous one), and `CFrame` stores a rotation id per value (`0` = nine
+  raw floats, otherwise one of the 24 built-in rotations) followed by three position planes.
+  `Float64`, `Ray`, `String`/bytecode, sequences and ranges are plain little-endian.
+- Fully modeled value types: string, bool, int32, float32, float64, `Enum`, `Color3`, `Vector3`,
+  `CFrame`, `Color3uint8`, `Int64`, `SharedString`, and `ProtectedString`/bytecode. Recognised but
+  only skipped (bytes consumed, value left unset): UDim, UDim2, Ray, Faces, Axes, BrickColor,
+  Vector2, Vector2int16, Quaternion, `Ref`, Vector3int16, NumberSequence, ColorSequence,
+  NumberRange, Rect, PhysicalProperties and Font. Unknown type ids produce a warning rather than
+  corrupting the tree. Because every chunk is framed independently, a property this beta cannot
+  read never desynchronises the rest of the file.
 
 Limits: 100 MiB per place (matching the project manager), 2,000,000 instances per INST chunk guard.
 
@@ -116,15 +129,18 @@ where the encrypted API key and the explicit confirmation flow live.
    what is implemented.
 2. **Assets** — extend the decoder's raw-capture path into typed `Content` properties; add a
    texture pipeline before adding mesh rendering.
-3. **Binary depth** — ZSTD chunk support, `PROP` types 0x1F (UniqueId) and physics blobs; add
-   fixtures with real Studio-saved files.
+3. **Binary depth** — ZSTD chunk support, actually decoding (not just skipping) sequences, UDim2
+   and Font, resolving `Ref`/`UniqueId`, and physics blobs; add fixtures saved by real Studio.
 4. **Instrumented tests** — snapshot the rendered AABB list for a fixture place and compare
    against expected geometry, on an emulator, in CI.
 
 ## Testing
 
 `app/src/test/java/.../EngineCoreTest.java` covers LZ4 (literals and back-references), the binary
-cursor, CFrame rotation round-trip, ray/AABB behaviour, character collision landing on a floor,
-XML place decoding of a generated baseplate, decode→write→decode round-tripping, and verbatim
-preservation of unmodeled properties (`Content`, `int64`). Run with `./gradlew testDebugUnitTest`.
+cursor together with the planar / zig-zag / bit-rotation array transforms, the 24 built-in CFrame
+rotations, an end-to-end decode of a synthetic binary `.rbxl` (header, `INST`/`PROP`/`PRNT`/`END`,
+hierarchy, size and colour), CFrame rotation round-trip, ray/AABB behaviour, character collision
+landing on a floor, XML place decoding of a generated baseplate, decode→write→decode round-tripping,
+and verbatim preservation of unmodeled properties (`Content`, `int64`). Run with
+`./gradlew testDebugUnitTest`.
 Device QA lives in `tests/` (see CONTRIBUTING.md).

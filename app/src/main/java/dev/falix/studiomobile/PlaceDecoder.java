@@ -193,139 +193,344 @@ final class PlaceDecoder {
     }
 
     // ------------------------------------------------------------------ binary
+    /**
+     * Binary place reader. Encodings follow the published Roblox binary model format:
+     * a 32-byte file header, 16-byte chunk headers, "interleaved" numeric planes stored
+     * structure-of-arrays, big-endian values with the documented zig-zag / bit-rotation
+     * transforms, difference-encoded referents and the 24 built-in CFrame rotation ids.
+     * ZSTD-compressed chunks are recognised by their magic number and reported instead of
+     * being silently mis-decoded.
+     */
     static Result binary(File file) throws Exception {
         Result r = new Result(); r.format = "Binary";
         byte[] data;
         try (InputStream in = new FileInputStream(file)) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] b = new byte[65536];
+            byte[] buffer = new byte[65536];
             int n; long total = 0;
-            while ((n = in.read(b)) != -1) { total += n; if (total > MAX_BYTES) throw new IOException("Place exceeds the 100 MiB reading limit."); out.write(b, 0, n); }
+            while ((n = in.read(buffer)) != -1) {
+                total += n;
+                if (total > MAX_BYTES) throw new IOException("Place exceeds the 100 MiB reading limit.");
+                out.write(buffer, 0, n);
+            }
             data = out.toByteArray();
         }
         if (data.length < 32) throw new IOException("Binary place is too small to be valid.");
         Cursor c = new Cursor(data);
-        c.skip(8);                      // "<roblox!"
-        c.skip(6);                      // 0x89 FF 0D 0A 1A 0A
-        c.skip(2);                      // version
-        c.skip(4);                      // class count
-        c.skip(4);                      // instance count
+        String magic = new String(c.bytes(8), StandardCharsets.ISO_8859_1);
+        if (!"<roblox!".equals(magic)) throw new IOException("Missing the binary Roblox signature.");
+        int[] expectedSignature = {0x89, 0xFF, 0x0D, 0x0A, 0x1A, 0x0A};
+        byte[] signature = c.bytes(6);
+        for (int i = 0; i < 6; i++) if ((signature[i] & 0xFF) != expectedSignature[i]) throw new IOException("Binary signature mismatch.");
+        int version = c.u16();
+        if (version != 0) throw new IOException("Unsupported binary model version " + version + ".");
+        c.skip(4);                                     // distinct class count
+        c.skip(4);                                     // total instance count
+        c.skip(8);                                     // reserved, always zero
+
         Instance root = new Instance("DataModel", "DataModel"); r.root = root;
-        LinkedHashMap<Integer, Instance> byId = new LinkedHashMap<>();
-        ArrayList<Integer> creationOrder = new ArrayList<>();
-        while (c.remaining() >= 4) {
+        LinkedHashMap<Integer, Instance> byReferent = new LinkedHashMap<>();
+        LinkedHashMap<Integer, ArrayList<Instance>> byTypeId = new LinkedHashMap<>();
+        ArrayList<Instance> creationOrder = new ArrayList<>();
+        ArrayList<String> sharedStrings = new ArrayList<>();
+
+        while (c.remaining() >= 16) {
             String chunk = c.string4();
-            if (chunk.equals("END\u0000") || chunk.startsWith("END")) break;
-            if (chunk.equals("ZSTD")) throw new IOException("This .rbxl uses ZSTD compression, which this beta cannot read yet. Open it in desktop Studio and save as .rbxlx, or use an .rbxlx place.");
-            if (chunk.equals("META")) { int count = c.u32(); for (int i = 0; i < count; i++) { c.str(); c.str(); } continue; }
-            if (chunk.equals("SIGN")) break; // signature chunk is the last payload; instances are already read
+            if (chunk.startsWith("END")) break;
             long compLength = c.u32() & 0xFFFFFFFFL;
             long uncompLength = c.u32() & 0xFFFFFFFFL;
+            c.skip(4);                                 // chunk reserved, always zero
             if (uncompLength > MAX_BYTES || compLength > MAX_BYTES) throw new IOException("Chunk length exceeds the safety limit.");
             byte[] payload;
-            if (compLength > 0) payload = lz4(c.bytes((int) compLength), (int) uncompLength);
-            else payload = c.bytes((int) uncompLength);
+            if (compLength > 0) {
+                byte[] compressed = c.bytes((int) compLength);
+                if (compressed.length >= 4 && (compressed[0] & 0xFF) == 0x28 && (compressed[1] & 0xFF) == 0xB5
+                        && (compressed[2] & 0xFF) == 0x2F && (compressed[3] & 0xFF) == 0xFD) {
+                    throw new IOException("This .rbxl uses ZSTD compression, which this beta cannot read yet. Open it in desktop Studio and save as .rbxlx, or use an .rbxlx place.");
+                }
+                payload = lz4(compressed, (int) uncompLength);
+            } else {
+                payload = c.bytes((int) uncompLength);
+            }
             Cursor p = new Cursor(payload);
-            if (chunk.startsWith("INST")) readInst(p, byId, creationOrder);
-            else if (chunk.startsWith("PROP")) readProps(p, byId, creationOrder, r);
-            else if (chunk.startsWith("PRNT")) readParents(p, byId);
+            if (chunk.startsWith("META")) {
+                long count = p.u32() & 0xFFFFFFFFL;
+                for (int i = 0; i < count; i++) { p.str(); p.str(); }
+            } else if (chunk.startsWith("SSTR")) {
+                readSharedStrings(p, sharedStrings);
+            } else if (chunk.startsWith("INST")) {
+                readInst(p, byReferent, byTypeId, creationOrder);
+            } else if (chunk.startsWith("PROP")) {
+                readProps(p, byTypeId, sharedStrings, r);
+            } else if (chunk.startsWith("PRNT")) {
+                readParents(p, byReferent);
+            } else if (chunk.startsWith("SIGN")) {
+                break;
+            }
         }
-        for (int id : creationOrder) root.add(byId.get(id));
+        for (Instance instance : creationOrder) if (instance.parent == null) root.add(instance);
         if (root.children.isEmpty()) r.warnings.add("No instances were decoded from this binary place.");
         return r;
     }
 
-    static void readInst(Cursor p, LinkedHashMap<Integer, Instance> byId, ArrayList<Integer> order) throws Exception {
-        int classId = p.u32();
-        String className = p.str();
-        p.skip(1);                                   // object format (0 plain, 1 service)
+    static void readSharedStrings(Cursor p, ArrayList<String> out) throws Exception {
+        int version = p.u32();
+        if (version != 0) throw new IOException("Unsupported SSTR chunk version " + version + ".");
         long count = p.u32() & 0xFFFFFFFFL;
-        if (className.isEmpty()) className = "Instance";
-        if (count > 2_000_000) throw new IOException("Implausible instance count in INST chunk.");
-        int[] ids = new int[(int) count], flags = new int[(int) count];
-        for (int i = 0; i < count; i += 4) {         // interleaved referents: four ids, then four scope bytes
-            for (int j = 0; j < 4 && i + j < count; j++) ids[i + j] = p.u32();
-            for (int j = 0; j < 4 && i + j < count; j++) flags[i + j] = p.u8();
-        }
+        if (count > 500_000) throw new IOException("Implausible shared string count.");
         for (int i = 0; i < count; i++) {
-            Instance inst = new Instance(className, className);
-            byId.put(ids[i], inst);
-            order.add(ids[i]);
+            p.skip(16);                                // MD5 hash of the entry
+            out.add(p.str());
         }
     }
 
-    static void readProps(Cursor p, LinkedHashMap<Integer, Instance> byId, ArrayList<Integer> order, Result r) throws Exception {
-        while (p.remaining() > 0) {
-            int referent = p.u32();
-            String name = p.str();
-            int type = p.u8();
-            if (type == 0) continue;
-            Instance sample = byId.get(referent);
-            if (sample == null) throw new IOException("Property references an unknown instance.");
-            ArrayList<Instance> sameClass = new ArrayList<>();
-            for (int id : order) { Instance x = byId.get(id); if (x.className.equals(sample.className)) sameClass.add(x); }
-            for (Instance target : sameClass) {
-                Object value = readValue(p, type, r);
-                if (target == sample) applyProperty(target, name, type, value, r);
-            }
+    static void readInst(Cursor p, LinkedHashMap<Integer, Instance> byReferent,
+                         LinkedHashMap<Integer, ArrayList<Instance>> byTypeId, ArrayList<Instance> order) throws Exception {
+        int typeId = p.u32();
+        String className = p.str();
+        if (className.isEmpty()) className = "Instance";
+        p.u8();                                        // object format: 1 when the class is a service
+        long count = p.u32() & 0xFFFFFFFFL;
+        if (count > 2_000_000) throw new IOException("Implausible instance count in INST chunk.");
+        int[] referents = p.referentArray((int) count);
+        ArrayList<Instance> group = new ArrayList<>((int) count);
+        for (int i = 0; i < count; i++) {
+            Instance instance = new Instance(className, className);
+            byReferent.put(referents[i], instance);
+            group.add(instance);
+            order.add(instance);
         }
+        byTypeId.put(typeId, group);
     }
 
-    static void applyProperty(Instance inst, String name, int type, Object value, Result r) {
+    static void readProps(Cursor p, LinkedHashMap<Integer, ArrayList<Instance>> byTypeId,
+                          ArrayList<String> sharedStrings, Result r) throws Exception {
+        int typeId = p.u32();
+        String propName = p.str().intern();
+        if (p.remaining() == 0) return;                // Roblox ignores PROP chunks that end after the name
+        int type = p.u8();
+        ArrayList<Instance> group = byTypeId.get(typeId);
+        if (group == null) return;                     // unknown class: the value layout is unknowable
+        int count = group.size();
+        Object[] values;
+        try {
+            values = readValues(p, type, count, sharedStrings);
+        } catch (IOException unsupported) {
+            r.warnings.add("Binary property " + propName + " (" + typeName(type) + ") is not modeled; it was skipped.");
+            return;
+        }
+        for (int i = 0; i < count; i++) applyProperty(group.get(i), propName, type, values[i], r);
+    }
+
+    static void applyProperty(Instance instance, String name, int type, Object value, Result r) {
         if (value == null) return;
-        if ("Name".equals(name)) { inst.name = String.valueOf(value); return; }
-        if (value instanceof Unsupported) { r.warnings.add("Property " + name + " (" + inst.className + ") uses an unmodeled binary type and was skipped."); return; }
-        inst.props.put(name.intern(), value);
-        if (type == 0x12) inst.tags.put(name.intern(), "token");
-        if (type == 0x1B) inst.tags.put(name.intern(), "int64");
-        if (type == 0x0C) inst.tags.put(name.intern(), "Color3");
+        if ("Name".equals(name)) { instance.name = String.valueOf(value); return; }
+        instance.props.put(name, value);
+        if (type == 0x12) instance.tags.put(name, "token");
+        if (type == 0x1B) instance.tags.put(name, "int64");
+        if (type == 0x0C) instance.tags.put(name, "Color3");
+        if (type == 0x04) instance.tags.put(name, "float");
+        if (type == 0x05) instance.tags.put(name, "double");
     }
 
-    static void readParents(Cursor p, LinkedHashMap<Integer, Instance> byId) throws Exception {
-        while (p.remaining() >= 8) {
-            int child = p.u32(), parent = p.u32();
-            Instance c = byId.get(child), par = byId.get(parent);
-            if (c != null && par != null && c.parent == null && c != par) par.add(c);
+    static void readParents(Cursor p, LinkedHashMap<Integer, Instance> byReferent) throws Exception {
+        int version = p.u8();
+        if (version != 0) throw new IOException("Unsupported PRNT chunk version " + version + ".");
+        long count = p.u32() & 0xFFFFFFFFL;
+        if (count > 5_000_000) throw new IOException("Implausible instance count in PRNT chunk.");
+        int[] children = p.referentArray((int) count);
+        int[] parents = p.referentArray((int) count);
+        for (int i = 0; i < count; i++) {
+            if (parents[i] == -1) continue;            // -1 marks a child of the DataModel
+            Instance child = byReferent.get(children[i]);
+            Instance parent = byReferent.get(parents[i]);
+            if (child != null && parent != null && child != parent) parent.add(child);
         }
     }
 
-    static final class Unsupported {}
-
-    static Object readValue(Cursor p, int type, Result r) throws Exception {
+    /** Reads one value per instance of the class, in INST order. Null entries mean "no value". */
+    static Object[] readValues(Cursor c, int type, int count, ArrayList<String> sharedStrings) throws Exception {
+        Object[] out = new Object[count];
         switch (type) {
-            case 0x01: return p.str();
-            case 0x02: return p.u8() != 0;
-            case 0x03: return p.u32();
-            case 0x04: return p.f32();
-            case 0x05: return p.f64();
-            case 0x06: p.skip(8); return null;
-            case 0x07: p.skip(16); return null;
-            case 0x08: p.skip(24); return null;
-            case 0x09: p.skip(1); return null;
-            case 0x0A: p.skip(1); return null;
-            case 0x0B: return (int) p.u32();
-            case 0x0C: { int[] c = {(int) Math.round(p.f32() * 255), (int) Math.round(p.f32() * 255), (int) Math.round(p.f32() * 255)}; return c; }
-            case 0x0D: p.skip(8); return null;
-            case 0x0E: return new Instance.Vector3(p.f32(), p.f32(), p.f32());
-            case 0x0F: p.skip(4); return null;
-            case 0x10: { double[] c = new double[12]; for (int i = 0; i < 9; i++) c[3 + i] = p.f32(); c[0] = p.f32(); c[1] = p.f32(); c[2] = p.f32(); return c; }
-            case 0x11: p.skip(16); return null;
-            case 0x12: return p.u32();
-            case 0x13: p.skip(4); return null;
-            case 0x14: p.skip(6); return null;
-            case 0x15: { long n = p.u32(); if (n > 1000) throw new IOException("Invalid NumberSequence."); p.skip((int) n * 12); return null; }
-            case 0x16: { long n = p.u32(); if (n > 1000) throw new IOException("Invalid ColorSequence."); p.skip((int) n * 16); return null; }
-            case 0x17: p.skip(8); return null;
-            case 0x18: p.skip(16); return null;
-            case 0x19: p.skip(20); return null;
-            case 0x1A: { long v = p.u32(); return (int) (v & 0xFFFFFFL); }
-            case 0x1B: return p.u64();
-            case 0x1C: p.skip(4); return null;
-            case 0x1D: return p.str();
-            case 0x1E: { p.skip(1); double[] c = new double[12]; for (int i = 0; i < 9; i++) c[3 + i] = p.f32(); c[0] = p.f32(); c[1] = p.f32(); c[2] = p.f32(); return c; }
+            case 0x01: for (int i = 0; i < count; i++) out[i] = c.str(); return out;                   // String (length-prefixed, in order)
+            case 0x02: for (int i = 0; i < count; i++) out[i] = c.u8() != 0; return out;               // Bool
+            case 0x03: { int[] v = c.interleavedI32(count); for (int i = 0; i < count; i++) out[i] = v[i]; return out; }  // Int32
+            case 0x04: { float[] v = c.interleavedF32(count); for (int i = 0; i < count; i++) out[i] = v[i]; return out; } // Float32
+            case 0x05: for (int i = 0; i < count; i++) out[i] = c.f64(); return out;                   // Float64 (little-endian, in order)
+            case 0x06: c.skip(count * 8); return out;                                                  // UDim: f32 array + i32 array
+            case 0x07: c.skip(count * 16); return out;                                                 // UDim2
+            case 0x08: c.skip(count * 24); return out;                                                 // Ray: six floats per value
+            case 0x09: case 0x0A: c.skip(count); return out;                                           // Faces, Axes: one byte each
+            case 0x0B: c.skip(count * 4); return out;                                                  // BrickColor
+            case 0x0C: {                                                                               // Color3: three f32 planes
+                float[] red = c.interleavedF32(count), green = c.interleavedF32(count), blue = c.interleavedF32(count);
+                for (int i = 0; i < count; i++) out[i] = new int[]{toByte(red[i]), toByte(green[i]), toByte(blue[i])};
+                return out;
+            }
+            case 0x0D: c.skip(count * 8); return out;                                                  // Vector2
+            case 0x0E: {                                                                               // Vector3: three f32 planes
+                float[] x = c.interleavedF32(count), y = c.interleavedF32(count), z = c.interleavedF32(count);
+                for (int i = 0; i < count; i++) out[i] = new Instance.Vector3(x[i], y[i], z[i]);
+                return out;
+            }
+            case 0x0F: c.skip(count * 4); return out;                                                  // Vector2int16
+            case 0x10: {                                                                               // CFrame: rotation ids first, then position planes
+                double[][] rotations = new double[count][];
+                for (int i = 0; i < count; i++) {
+                    int id = c.u8();
+                    if (id == 0) {
+                        double[] rotation = new double[9];             // raw rows R00 R01 R02 R10 R11 R12 R20 R21 R22
+                        for (int k = 0; k < 9; k++) rotation[k] = c.f32();
+                        rotations[i] = rotation;
+                    } else {
+                        double[] rotation = basicRotation(id);
+                        if (rotation == null) throw new IOException("Unknown CFrame rotation id " + id + ".");
+                        rotations[i] = rotation;
+                    }
+                }
+                float[] x = c.interleavedF32(count), y = c.interleavedF32(count), z = c.interleavedF32(count);
+                for (int i = 0; i < count; i++) {
+                    double[] cframe = new double[12];
+                    cframe[0] = x[i]; cframe[1] = y[i]; cframe[2] = z[i];
+                    System.arraycopy(rotations[i], 0, cframe, 3, 9);
+                    out[i] = cframe;
+                }
+                return out;
+            }
+            case 0x11: c.skip(count * 16); return out;                                                 // Quaternion
+            case 0x12: { int[] v = c.interleavedU32(count); for (int i = 0; i < count; i++) out[i] = v[i]; return out; }  // Enum
+            case 0x13: c.referentArray(count); return out;                                             // Ref (left unresolved)
+            case 0x14: c.skip(count * 6); return out;                                                  // Vector3int16
+            case 0x15: {                                                                               // NumberSequence: per value u32 count + count * (time, value, envelope)
+                for (int i = 0; i < count; i++) {
+                    long keypoints = c.u32() & 0xFFFFFFFFL;
+                    if (keypoints > 4096) throw new IOException("Invalid NumberSequence keypoint count.");
+                    c.skip((int) keypoints * 12);
+                }
+                return out;
+            }
+            case 0x16: {                                                                               // ColorSequence: per value u32 count + count * (time, r, g, b, envelope)
+                for (int i = 0; i < count; i++) {
+                    long keypoints = c.u32() & 0xFFFFFFFFL;
+                    if (keypoints > 4096) throw new IOException("Invalid ColorSequence keypoint count.");
+                    c.skip((int) keypoints * 20);
+                }
+                return out;
+            }
+            case 0x17: c.skip(count * 8); return out;                                                  // NumberRange
+            case 0x18: c.skip(count * 16); return out;                                                 // Rect: four f32 planes
+            case 0x19: {                                                                               // PhysicalProperties: discriminator byte + optional custom floats
+                for (int i = 0; i < count; i++) {
+                    int discriminator = c.u8();
+                    if ((discriminator & 0b01) != 0) c.skip((discriminator & 0b10) != 0 ? 24 : 20);
+                }
+                return out;
+            }
+            case 0x1A: {                                                                               // Color3uint8: three byte planes
+                byte[] planes = c.interleavedBytes(count, 3);
+                for (int i = 0; i < count; i++)
+                    out[i] = ((planes[i * 3] & 0xFF) << 16) | ((planes[i * 3 + 1] & 0xFF) << 8) | (planes[i * 3 + 2] & 0xFF);
+                return out;
+            }
+            case 0x1B: { long[] v = c.interleavedI64(count); for (int i = 0; i < count; i++) out[i] = v[i]; return out; }  // Int64
+            case 0x1C: {                                                                               // SharedString: u32 indices into the SSTR table
+                int[] indexes = c.interleavedU32(count);
+                for (int i = 0; i < count; i++)
+                    out[i] = indexes[i] >= 0 && indexes[i] < sharedStrings.size() ? sharedStrings.get(indexes[i]) : null;
+                return out;
+            }
+            case 0x1D: for (int i = 0; i < count; i++) out[i] = c.str(); return out;                   // Bytecode / ProtectedString
+            case 0x20: {                                                                               // Font: family, weight, style, cached face
+                for (int i = 0; i < count; i++) { c.str(); c.skip(3); c.str(); }
+                return out;
+            }
             default: throw new IOException("Unmodeled binary property type 0x" + Integer.toHexString(type) + ".");
         }
     }
+
+    static int toByte(float component) {
+        int value = Math.round(component * 255);
+        return value < 0 ? 0 : Math.min(value, 255);
+    }
+
+    /**
+     * Row-major rotation matrix (R00 R01 R02 R10 R11 R12 R20 R21 R22) for a CFrame basic rotation
+     * id, or null when the id is not one of the 24 the format defines. The matrices are the exact
+     * values in the published format description.
+     */
+    static double[] basicRotation(int id) {
+        switch (id) {
+            case 0x02: return new double[]{1, 0, 0, 0, 1, 0, 0, 0, 1};
+            case 0x03: return new double[]{1, 0, 0, 0, 0, -1, 0, 1, 0};
+            case 0x05: return new double[]{1, 0, 0, 0, -1, 0, 0, 0, -1};
+            case 0x06: return new double[]{1, 0, 0, 0, 0, 1, 0, -1, 0};
+            case 0x07: return new double[]{0, 1, 0, 1, 0, 0, 0, 0, -1};
+            case 0x09: return new double[]{0, 0, 1, 1, 0, 0, 0, 1, 0};
+            case 0x0a: return new double[]{0, -1, 0, 1, 0, 0, 0, 0, 1};
+            case 0x0c: return new double[]{0, 0, -1, 1, 0, 0, 0, -1, 0};
+            case 0x0d: return new double[]{0, 1, 0, 0, 0, 1, 1, 0, 0};
+            case 0x0e: return new double[]{0, 0, -1, 0, 1, 0, 1, 0, 0};
+            case 0x10: return new double[]{0, -1, 0, 0, 0, -1, 1, 0, 0};
+            case 0x11: return new double[]{0, 0, 1, 0, -1, 0, 1, 0, 0};
+            case 0x14: return new double[]{-1, 0, 0, 0, 1, 0, 0, 0, -1};
+            case 0x15: return new double[]{-1, 0, 0, 0, 0, 1, 0, 1, 0};
+            case 0x17: return new double[]{-1, 0, 0, 0, -1, 0, 0, 0, 1};
+            case 0x18: return new double[]{-1, 0, 0, 0, 0, -1, 0, -1, 0};
+            case 0x19: return new double[]{0, 1, 0, -1, 0, 0, 0, 0, 1};
+            case 0x1b: return new double[]{0, 0, -1, -1, 0, 0, 0, 1, 0};
+            case 0x1c: return new double[]{0, -1, 0, -1, 0, 0, 0, 0, -1};
+            case 0x1e: return new double[]{0, 0, 1, -1, 0, 0, 0, -1, 0};
+            case 0x1f: return new double[]{0, 1, 0, 0, 0, -1, -1, 0, 0};
+            case 0x20: return new double[]{0, 0, 1, 0, 1, 0, -1, 0, 0};
+            case 0x22: return new double[]{0, -1, 0, 0, 0, 1, -1, 0, 0};
+            case 0x23: return new double[]{0, 0, -1, 0, -1, 0, -1, 0, 0};
+            default: return null;
+        }
+    }
+
+    static String typeName(int type) {
+        switch (type) {
+            case 0x01: return "String";
+            case 0x02: return "Bool";
+            case 0x03: return "Int32";
+            case 0x04: return "Float32";
+            case 0x05: return "Float64";
+            case 0x06: return "UDim";
+            case 0x07: return "UDim2";
+            case 0x08: return "Ray";
+            case 0x09: return "Faces";
+            case 0x0A: return "Axes";
+            case 0x0B: return "BrickColor";
+            case 0x0C: return "Color3";
+            case 0x0D: return "Vector2";
+            case 0x0E: return "Vector3";
+            case 0x0F: return "Vector2int16";
+            case 0x10: return "CFrame";
+            case 0x11: return "Quaternion";
+            case 0x12: return "Enum";
+            case 0x13: return "Ref";
+            case 0x14: return "Vector3int16";
+            case 0x15: return "NumberSequence";
+            case 0x16: return "ColorSequence";
+            case 0x17: return "NumberRange";
+            case 0x18: return "Rect";
+            case 0x19: return "PhysicalProperties";
+            case 0x1A: return "Color3uint8";
+            case 0x1B: return "Int64";
+            case 0x1C: return "SharedString";
+            case 0x1D: return "Bytecode";
+            case 0x1E: return "OptionalCFrame";
+            case 0x1F: return "UniqueId";
+            case 0x20: return "Font";
+            default: return "0x" + Integer.toHexString(type);
+        }
+    }
+
+    /** Inverse of the zig-zag transform Roblox applies to 32-bit values. */
+    static int untransformI32(int value) { return (value >>> 1) ^ -(value & 1); }
+
+    /** Inverse of the zig-zag transform Roblox applies to 64-bit values. */
+    static long untransformI64(long value) { return (value >>> 1) ^ -(value & 1L); }
 
     // ------------------------------------------------------------------ LZ4 block format
     static byte[] lz4(byte[] src, int expected) throws IOException {
@@ -379,6 +584,72 @@ final class PlaceDecoder {
             long lo = u32() & 0xFFFFFFFFL, hi = u32() & 0xFFFFFFFFL;
             return Double.longBitsToDouble(lo | (hi << 32));
         }
+        int u16() throws IOException {
+            if (at + 2 > b.length) throw new IOException("Unexpected end of data.");
+            int v = (b[at] & 0xFF) | ((b[at + 1] & 0xFF) << 8);
+            at += 2;
+            return v;
+        }
+
+        /**
+         * Reads `count` big-endian 32-bit values that Roblox stores as structure-of-arrays planes:
+         * each of the four bytes occupies its own run of `count` bytes.
+         */
+        int[] interleavedU32(int count) throws IOException {
+            if (count < 0) throw new IOException("Invalid array length.");
+            byte[] raw = bytes(count * 4);
+            int[] out = new int[count];
+            for (int i = 0; i < count; i++)
+                out[i] = ((raw[i] & 0xFF) << 24) | ((raw[count + i] & 0xFF) << 16)
+                        | ((raw[2 * count + i] & 0xFF) << 8) | (raw[3 * count + i] & 0xFF);
+            return out;
+        }
+
+        int[] interleavedI32(int count) throws IOException {
+            int[] out = interleavedU32(count);
+            for (int i = 0; i < count; i++) out[i] = untransformI32(out[i]);
+            return out;
+        }
+
+        /** Planar big-endian bit patterns rotated back one bit to recover each float. */
+        float[] interleavedF32(int count) throws IOException {
+            int[] raw = interleavedU32(count);
+            float[] out = new float[count];
+            for (int i = 0; i < count; i++) out[i] = Float.intBitsToFloat(Integer.rotateRight(raw[i], 1));
+            return out;
+        }
+
+        long[] interleavedI64(int count) throws IOException {
+            if (count < 0) throw new IOException("Invalid array length.");
+            byte[] raw = bytes(count * 8);
+            long[] out = new long[count];
+            for (int i = 0; i < count; i++) {
+                long v = 0;
+                for (int k = 0; k < 8; k++) v = (v << 8) | (raw[count * k + i] & 0xFFL);
+                out[i] = untransformI64(v);
+            }
+            return out;
+        }
+
+        /** Reads `count` fixed-size records from planar layout back into element-major order. */
+        byte[] interleavedBytes(int count, int elementSize) throws IOException {
+            if (count < 0 || elementSize <= 0) throw new IOException("Invalid array length.");
+            byte[] raw = bytes(count * elementSize);
+            byte[] out = new byte[count * elementSize];
+            for (int i = 0; i < count; i++)
+                for (int j = 0; j < elementSize; j++)
+                    out[i * elementSize + j] = raw[i + count * j];
+            return out;
+        }
+
+        /** Referent arrays are difference-encoded, so each value accumulates onto the previous one. */
+        int[] referentArray(int count) throws IOException {
+            int[] out = interleavedI32(count);
+            int last = 0;
+            for (int i = 0; i < count; i++) { last += out[i]; out[i] = last; }
+            return out;
+        }
+
         String str() throws IOException {
             long len = u32() & 0xFFFFFFFFL;
             if (len > remaining()) throw new IOException("Invalid string length.");

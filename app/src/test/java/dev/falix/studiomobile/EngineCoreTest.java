@@ -6,8 +6,10 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Engine core tests that run on the JVM (no device needed): LZ4 block decoding, binary cursor
@@ -127,6 +129,138 @@ public class EngineCoreTest {
         assertTrue(out.contains("4294967296"));
         assertTrue(out.contains("<Vector3 name=\"size\"><X>2</X><Y>2</Y><Z>2</Z></Vector3>"));
         file.delete();
+    }
+
+    @Test public void binaryPlaceDecodesInstancesPropertiesAndHierarchy() throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write("<roblox!".getBytes(StandardCharsets.ISO_8859_1));
+        out.write(new byte[]{(byte) 0x89, (byte) 0xFF, (byte) 0x0D, (byte) 0x0A, (byte) 0x1A, (byte) 0x0A});
+        u16(out, 0);            // file version
+        u32(out, 2);            // distinct class count
+        u32(out, 2);            // total instance count
+        out.write(new byte[8]); // reserved
+
+        ByteArrayOutputStream inst = new ByteArrayOutputStream();
+        u32(inst, 1); str(inst, "Workspace"); inst.write(0); u32(inst, 1); refArray(inst, 0);
+        chunk(out, "INST", inst.toByteArray());
+
+        inst = new ByteArrayOutputStream();
+        u32(inst, 2); str(inst, "Part"); inst.write(0); u32(inst, 1); refArray(inst, 1);
+        chunk(out, "INST", inst.toByteArray());
+
+        ByteArrayOutputStream prop = new ByteArrayOutputStream();
+        u32(prop, 1); str(prop, "Name"); prop.write(0x01); str(prop, "Workspace");
+        chunk(out, "PROP", prop.toByteArray());
+
+        prop = new ByteArrayOutputStream();
+        u32(prop, 2); str(prop, "Name"); prop.write(0x01); str(prop, "Floor");
+        chunk(out, "PROP", prop.toByteArray());
+
+        // Vector3 is three planar big-endian float arrays (one element each here).
+        prop = new ByteArrayOutputStream();
+        u32(prop, 2); str(prop, "size"); prop.write(0x0E);
+        f32Planes(prop, 3f); f32Planes(prop, 4f); f32Planes(prop, 5f);
+        chunk(out, "PROP", prop.toByteArray());
+
+        // Color3uint8 is three separate byte planes.
+        prop = new ByteArrayOutputStream();
+        u32(prop, 2); str(prop, "Color3uint8"); prop.write(0x1A);
+        prop.write(0x12); prop.write(0x34); prop.write(0x56);
+        chunk(out, "PROP", prop.toByteArray());
+
+        ByteArrayOutputStream prnt = new ByteArrayOutputStream();
+        prnt.write(0);
+        u32(prnt, 1);
+        refArray(prnt, 1);       // child
+        refArray(prnt, 0);       // parent
+        chunk(out, "PRNT", prnt.toByteArray());
+
+        chunk(out, "END", new byte[0]);
+
+        File file = File.createTempFile("engine-binary", ".rbxl");
+        try (FileOutputStream fos = new FileOutputStream(file)) { fos.write(out.toByteArray()); }
+        PlaceDecoder.Result decoded = PlaceDecoder.decode(file);
+        assertEquals("Binary", decoded.format);
+        Instance workspace = decoded.root.findFirst("Workspace");
+        assertNotNull("Workspace must decode", workspace);
+        Instance part = workspace.findFirst("Part");
+        assertNotNull("Part must be parented under Workspace", part);
+        assertEquals("Floor", part.name);
+        assertEquals(3, part.size()[0], 1e-6);
+        assertEquals(4, part.size()[1], 1e-6);
+        assertEquals(5, part.size()[2], 1e-6);
+        assertEquals(0x123456, part.getColor());
+        assertEquals(2, decoded.instances);
+        file.delete();
+    }
+
+    @Test public void basicRotationIdsMatchThePublishedMatrices() {
+        assertArrayEquals(new double[]{1, 0, 0, 0, 1, 0, 0, 0, 1}, PlaceDecoder.basicRotation(0x02), 0);
+        assertArrayEquals(new double[]{0, 1, 0, 0, 0, -1, -1, 0, 0}, PlaceDecoder.basicRotation(0x1f), 0);
+        assertArrayEquals(new double[]{0, 0, -1, 0, -1, 0, -1, 0, 0}, PlaceDecoder.basicRotation(0x23), 0);
+        assertTrue("undefined ids must report null", PlaceDecoder.basicRotation(0x04) == null);
+    }
+
+    @Test public void planarArraysDecodeBigEndianTransformsAndReferentDeltas() throws Exception {
+        // Int32 planes, zig-zag encoded: stored 1 -> -1, stored 4 -> 2.
+        int[] ints = new PlaceDecoder.Cursor(new byte[]{0, 0, 0, 0, 0, 0, 0x01, 0x04}).interleavedI32(2);
+        assertArrayEquals(new int[]{-1, 2}, ints);
+
+        // Referent planes are additionally difference-encoded: deltas +5, +2, -3 -> 5, 7, 4.
+        int[] refs = new PlaceDecoder.Cursor(new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0A, 0x04, 0x05}).referentArray(3);
+        assertArrayEquals(new int[]{5, 7, 4}, refs);
+
+        // Float32 planes hold big-endian bit patterns rotated left one bit.
+        ByteArrayOutputStream f32 = new ByteArrayOutputStream();
+        f32Planes(f32, 1.5f, -2f, 0f);
+        float[] floats = new PlaceDecoder.Cursor(f32.toByteArray()).interleavedF32(3);
+        assertEquals(1.5f, floats[0], 0f);
+        assertEquals(-2f, floats[1], 0f);
+        assertEquals(0f, floats[2], 0f);
+    }
+
+    private static void u16(ByteArrayOutputStream out, int value) {
+        out.write(value & 0xFF);
+        out.write((value >>> 8) & 0xFF);
+    }
+
+    private static void u32(ByteArrayOutputStream out, long value) {
+        out.write((int) (value & 0xFF));
+        out.write((int) ((value >>> 8) & 0xFF));
+        out.write((int) ((value >>> 16) & 0xFF));
+        out.write((int) ((value >>> 24) & 0xFF));
+    }
+
+    private static void str(ByteArrayOutputStream out, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        u32(out, bytes.length);
+        out.write(bytes, 0, bytes.length);
+    }
+
+    /** Referent/Int32 values are zig-zag transformed before being written big-endian. */
+    private static void zigI32(ByteArrayOutputStream out, int value) {
+        u32(out, (value << 1) ^ (value >> 31));
+    }
+
+    private static void refArray(ByteArrayOutputStream out, int... referents) {
+        for (int referent : referents) zigI32(out, referent);
+    }
+
+    /** Writes "count" floats in the planar layout the binary format uses, x0 x1 .. xN, y0 y1 .. yN, ... */
+    private static void f32Planes(ByteArrayOutputStream out, float... values) {
+        int[] rotated = new int[values.length];
+        for (int i = 0; i < values.length; i++) rotated[i] = Integer.rotateLeft(Float.floatToIntBits(values[i]), 1);
+        for (int plane = 0; plane < 4; plane++)
+            for (int i = 0; i < values.length; i++) out.write((rotated[i] >>> (24 - 8 * plane)) & 0xFF);
+    }
+
+    private static void chunk(ByteArrayOutputStream out, String name, byte[] payload) {
+        byte[] bytes = name.getBytes(StandardCharsets.ISO_8859_1);
+        for (int i = 0; i < 4; i++) out.write(i < bytes.length ? bytes[i] : 0);
+        u32(out, 0);                 // compressed length: 0 means the payload is stored verbatim
+        u32(out, payload.length);
+        u32(out, 0);                 // reserved
+        out.write(payload, 0, payload.length);
     }
 
     private static File writeTemp(String name, String content) throws Exception {
