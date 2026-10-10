@@ -5,3 +5,6 @@ build/
 app/build/
 *.keystore
 *.jks
+# The shared debug certificate is intentionally committed: it lets CI and local debug
+# builds update an already installed app in place. It is not a release/production key.
+!keystore/debug.keystore

@@ -103,27 +103,40 @@ Requirements: JDK 17, Android SDK platform 35, build-tools 35.0.0.
 
 ```bash
 export ANDROID_HOME=/path/to/android-sdk
-./gradlew assembleDebug          # APK at app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleDebug          # debug-signed APK at app/build/outputs/apk/debug/app-debug.apk
 ./gradlew testDebugUnitTest      # engine core tests
+./build-apk.sh                   # alternative scripted build into build/ (same certificate)
 ```
 
 `app/libs/*.jar` (OkHttp/Okio/Kotlin stdlib/SnakeYAML/annotations) are vendored and hash-pinned;
 `sha256sum -c app/libs/SHA256SUMS` verifies them before compilation. `ANDROID_HOME` must point at
 an SDK where `platforms/android-35` and `build-tools/35.0.0` are installed.
 
-### CI builds (GoyTeam)
+### Debug APKs from CI (GoyTeam)
 
 Every push, pull request and manual run builds and tests the app in GitHub Actions
-(`.github/workflows/goyteam-apk.yml`) and uploads a ready-to-install artifact named
-**`StudioMobile-GoyTeam-v<version>`** with a SHA-256 checksum. Tagged commits (`v*`) also publish a
-GitHub Release with the APK attached. CI artifacts are signed with the CI debug keystore; uninstall
-an older build before installing a new one unless you ship your own keystore.
+(`.github/workflows/goyteam-apk.yml`) and publishes a ready-to-install **debug** APK named
+**`StudioMobile-GoyTeam-v<version>-debug.apk`** with a SHA-256 checksum.
+
+- **Easy updates:** every GoyTeam build (CI *and* `./build-apk.sh`, *and* `./gradlew assembleDebug`)
+is signed with the same debug certificate committed at [`keystore/debug.keystore`](keystore/debug.keystore)
+(alias `goyteam-debug`, password `android`). Installing a newer build simply replaces the old one —
+no uninstall, and your projects/settings stay in place. Only a build signed with a *different*
+certificate needs one uninstall first.
+- **Rolling download:** every push to `main` updates the prerelease **[debug-latest](https://github.com/GoyTeam/StudioMobile/releases/tag/debug-latest)**
+with the newest APK, so you can always sideload the latest build without a GitHub login.
+- **Per-run artifacts:** each workflow run also uploads `StudioMobile-GoyTeam-v<version>-debug` as
+an artifact (login required), and tagged commits (`v*`) publish a permanent release.
+- The committed certificate is a **debug/sideload identity only** — it is public by design and must
+never be used for production or store releases.
 
 ## Install notes
 
-This project ships test-signed sideload builds. Keep your own keystore if you want stable updates.
-Back up `.rbxl`/`.rbxlx` files (including `Documents/StudioMobile`) before switching builds, and
-never share your creator API key. On Android 11+ the app can use all-files access or a user-chosen
+This project ships test-signed sideload builds. Debug APKs from this repository all share the
+committed GoyTeam debug certificate, so newer builds install directly over older ones. Switching
+from a build signed with a different key (for example a locally generated one) needs a single
+uninstall first; back up `.rbxl`/`.rbxlx` files (including `Documents/StudioMobile`) before doing
+that, and never share your creator API key. On Android 11+ the app can use all-files access or a user-chosen
 SAF folder; on Android 13+ notifications are optional.
 
 ## Contributing

@@ -5,7 +5,7 @@
   "package": "dev.falix.studiomobile",
   "minSdk": 26,
   "targetSdk": 35,
-  "type": "test-signed sideload build",
+  "type": "debug-signed sideload build",
   "apk_sha256": null,
   "apk_sha256_note": "Computed by the GoyTeam GitHub Actions workflow and attached to the release artifact as StudioMobile-GoyTeam-v<version>.apk.sha256.",
   "engine": {
@@ -33,7 +33,8 @@
   "screenshots": "Only real captures are accepted. Historical QA screenshots in this repository are native View.draw captures excluding system overlays. No fabricated cloud account or device run is claimed for 0.4.0.",
   "ci": {
     "workflow": ".github/workflows/goyteam-apk.yml",
-    "artifact": "StudioMobile-GoyTeam-v<version>.apk (+ .sha256)",
-    "signing": "CI debug keystore"
+    "artifact": "StudioMobile-GoyTeam-v<version>-debug.apk (+ .sha256)",
+    "release_channel": "Rolling prerelease tag debug-latest is updated on every push to main; tags publish permanent releases",
+    "signing": "Shared committed debug certificate keystore/debug.keystore (alias goyteam-debug) so every GoyTeam debug build installs over the previous one"
   }
 }

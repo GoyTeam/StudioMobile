@@ -19,11 +19,13 @@ jar cf "$BUILD/classes.jar" -C "$BUILD/classes" .
 cp "$BUILD/resources.apk" "$BUILD/unsigned.apk"
 (cd "$BUILD/dex"; zip -q -j "$BUILD/unsigned.apk" classes*.dex)
 "$TOOLS/zipalign" -f 4 "$BUILD/unsigned.apk" "$BUILD/aligned.apk"
-KEYSTORE="${STUDIO_KEYSTORE:-$HOME/.android/studio-mobile-test.keystore}"
-mkdir -p "$(dirname "$KEYSTORE")"
+# Shared GoyTeam debug certificate (committed): local script, Gradle debug builds and CI all
+# sign with the same identity so a new APK installs over the previous one without uninstalling.
+KEYSTORE="${STUDIO_KEYSTORE:-keystore/debug.keystore}"
 if [ ! -f "$KEYSTORE" ]; then
-  keytool -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android -alias studio-test -keyalg RSA -keysize 2048 -validity 3650 -dname 'CN=Studio Mobile Test Build, OU=Unofficial, O=Falix, C=IN' >/dev/null 2>&1
+  echo "Missing shared debug keystore: $KEYSTORE (run keytool -genkeypair as documented in CONTRIBUTING.md)" >&2
+  exit 1
 fi
-"$TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias studio-test --ks-pass pass:android --key-pass pass:android --out "$BUILD/StudioMobile-GoyTeam-0.4.0.apk" "$BUILD/aligned.apk"
-"$TOOLS/apksigner" verify --verbose "$BUILD/StudioMobile-GoyTeam-0.4.0.apk"
-echo 'Test-signed sideload APK: build/StudioMobile-GoyTeam-0.4.0.apk'
+"$TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias goyteam-debug --ks-pass pass:android --key-pass pass:android --out "$BUILD/StudioMobile-GoyTeam-0.4.0-debug.apk" "$BUILD/aligned.apk"
+"$TOOLS/apksigner" verify --verbose "$BUILD/StudioMobile-GoyTeam-0.4.0-debug.apk"
+echo 'Debug-signed sideload APK: build/StudioMobile-GoyTeam-0.4.0-debug.apk'
