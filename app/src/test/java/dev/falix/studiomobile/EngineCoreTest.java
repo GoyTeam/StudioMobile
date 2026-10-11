@@ -2,6 +2,7 @@ package dev.falix.studiomobile;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -286,5 +287,240 @@ public class EngineCoreTest {
         for (int i = 0; i < 200; i++) scene.step(1 / 60.0);
         assertEquals(2.5, scene.charPos[1], 0.2);
         assertTrue("character should rest on the floor", scene.onGround);
+    }
+
+    // ------------------------------------------------------------------ lighting
+
+    @Test public void sunFollowsClockTimeAndGeographicLatitude() {
+        double[] sunrise = EngineLighting.sunDirection(6, 41.7333);
+        assertEquals("sunrise sits on the horizon", 0, sunrise[1], 1e-6);
+        assertTrue("sunrise is in the east (+X)", sunrise[0] > 0.99);
+
+        double[] noonEquator = EngineLighting.sunDirection(12, 0);
+        assertEquals("noon at the equator is the zenith", 1, noonEquator[1], 1e-6);
+
+        double[] noon = EngineLighting.sunDirection(12, 41.7333);
+        assertTrue("latitude lowers the noon sun", noon[1] < 0.8);
+        assertTrue("a northern latitude leans the arc toward +Z", noon[2] > 0.5);
+
+        double[] sunset = EngineLighting.sunDirection(18, 41.7333);
+        assertEquals(0, sunset[1], 1e-6);
+        assertTrue("sunset is in the west (-X)", sunset[0] < -0.99);
+
+        double[] midnight = EngineLighting.sunDirection(0, 41.7333);
+        assertTrue("the sun is below the horizon at midnight", midnight[1] < -0.5);
+
+        for (double hour = 0; hour < 24; hour += 1.5) {
+            double[] d = EngineLighting.sunDirection(hour, 52.5);
+            assertEquals("sun direction stays a unit vector", 1, Math.hypot(Math.hypot(d[0], d[1]), d[2]), 1e-9);
+        }
+        assertTrue(EngineLighting.sunDirection(12, 41.7333)[1] > EngineLighting.sunDirection(9, 41.7333)[1]);
+        assertTrue(EngineLighting.sunDirection(15, 41.7333)[1] < EngineLighting.sunDirection(12, 41.7333)[1]);
+    }
+
+    @Test public void lightingWithoutAServiceUsesRobloxDefaults() {
+        EngineLighting light = EngineLighting.from(null);
+        assertEquals(14, light.clockTime, 1e-9);
+        assertEquals(2, light.brightness, 1e-9);
+        assertEquals("default FogEnd means no visible fog", false, light.fogEnabled);
+        assertEquals(0, light.fogFactor(5000), 1e-9);
+        assertTrue("daylight sun intensity", light.sunGain > 0.9);
+        assertTrue("outdoor ambient lights the scene", light.ambientDiffuse[0] > 0.3);
+        assertTrue(light.dayFactor > 0.99);
+        assertFalse("no effects means no post pass", light.needsPost());
+    }
+
+    @Test public void lightingServicePropertiesReachTheRenderer() {
+        Instance root = new Instance("DataModel", "DataModel");
+        Instance lighting = new Instance("Lighting", "Lighting");
+        root.add(lighting);
+        lighting.props.put("Ambient", new int[]{255, 0, 0});
+        lighting.props.put("OutdoorAmbient", new int[]{0, 0, 0});
+        lighting.props.put("ColorShift_Top", new int[]{0, 0, 255});
+        lighting.props.put("ClockTime", 0d);
+        lighting.props.put("Brightness", 3d);
+        lighting.props.put("FogColor", new int[]{10, 20, 30});
+        lighting.props.put("FogStart", 5d);
+        lighting.props.put("FogEnd", 105d);
+        lighting.props.put("EnvironmentDiffuseScale", 1d);
+        lighting.props.put("GlobalShadows", false);
+        lighting.props.put("Technology", 3);
+
+        EngineLighting light = EngineLighting.from(root);
+        assertEquals(0, light.clockTime, 1e-9);
+        assertEquals("midnight follows ClockTime 0", 0, light.dayFactor, 1e-9);
+        assertEquals("no sun at midnight", 0, light.sunGain, 1e-9);
+        assertEquals(1, light.ambient[0], 1e-9);
+        assertEquals(1, light.colorShiftTop[2], 1e-9);
+        assertTrue("the red Ambient reaches the ambient term", light.ambientDiffuse[0] > 0.9);
+        assertTrue("unset channels stay dark", light.ambientDiffuse[1] < 0.2);
+        assertTrue(light.fogEnabled);
+        assertEquals(0.5, light.fogFactor(55), 1e-6);
+        assertEquals("the sky gradient is mixed in with EnvironmentDiffuseScale", true, light.ambientDiffuse[0] >= light.ambient[0] * 0.1);
+        assertFalse(light.globalShadows);
+        assertEquals("Future", light.technology);
+        assertTrue(light.summary().contains("ClockTime"));
+    }
+
+    @Test public void skyAtmosphereCloudsAndPostEffectsAreReadFromTheDataModel() {
+        Instance root = new Instance("DataModel", "DataModel");
+        Instance lighting = new Instance("Lighting", "Lighting");
+        root.add(lighting);
+        Instance sky = new Instance("Sky", "Sky");
+        sky.props.put("SunAngularSize", 30d);
+        sky.props.put("StarCount", 5000d);
+        lighting.add(sky);
+        Instance atmosphere = new Instance("Atmosphere", "Atmosphere");
+        atmosphere.props.put("Density", 0.5d);
+        atmosphere.props.put("Haze", 2d);
+        atmosphere.props.put("Glare", 0.3d);
+        atmosphere.props.put("Color", new int[]{255, 200, 150});
+        lighting.add(atmosphere);
+        Instance terrain = new Instance("Terrain", "Terrain");
+        root.add(terrain);
+        Instance clouds = new Instance("Clouds", "Clouds");
+        clouds.props.put("Cover", 0.65d);
+        clouds.props.put("Density", 0.4d);
+        terrain.add(clouds);
+        Instance bloom = new Instance("BloomEffect", "BloomEffect");
+        bloom.props.put("Intensity", 1.4d);
+        bloom.props.put("Threshold", 1.5d);
+        lighting.add(bloom);
+        Instance blur = new Instance("BlurEffect", "BlurEffect");
+        blur.props.put("Size", 12d);
+        lighting.add(blur);
+        Instance cc = new Instance("ColorCorrectionEffect", "ColorCorrectionEffect");
+        cc.props.put("Saturation", -0.5d);
+        cc.props.put("TintColor", new int[]{255, 220, 200});
+        lighting.add(cc);
+        lighting.props.put("ExposureCompensation", 0.75d);
+
+        EngineLighting light = EngineLighting.from(root);
+        assertTrue(light.sky);
+        assertEquals(30, light.sunAngularSize, 1e-9);
+        assertEquals(5000, light.starCount, 1e-9);
+        assertTrue(light.atmosphere);
+        assertEquals(0.5, light.atmosphereDensity, 1e-9);
+        assertEquals(150 / 255.0, light.atmosphereColor[2], 1e-9);
+        assertTrue("Clouds under Terrain are honoured", light.clouds);
+        assertEquals(0.65, light.cloudCover, 1e-9);
+        assertTrue(light.bloom);
+        assertEquals(1.4, light.bloomIntensity, 1e-9);
+        assertTrue(light.blur);
+        assertEquals(12, light.blurSize, 1e-9);
+        assertTrue(light.colorCorrection);
+        assertEquals(-0.5, light.ccSaturation, 1e-9);
+        assertEquals(0.75, light.exposureCompensation, 1e-9);
+        assertTrue(light.needsPost());
+    }
+
+    @Test public void neutralColourCorrectionSkipsThePostPass() {
+        Instance root = new Instance("DataModel", "DataModel");
+        Instance lighting = new Instance("Lighting", "Lighting");
+        root.add(lighting);
+        lighting.props.put("ClockTime", 14d);
+        lighting.add(new Instance("ColorCorrectionEffect", "ColorCorrectionEffect"));
+        EngineLighting light = EngineLighting.from(root);
+        assertTrue("the effect object is still reported", light.colorCorrection);
+        assertFalse("an untouched ColorCorrectionEffect must not cost a framebuffer pass", light.needsPost());
+        // Moving any of its properties turns the pass on, as does an added effect.
+        lighting.children.get(0).props.put("Saturation", -0.4d);
+        assertTrue(EngineLighting.from(root).needsPost());
+        lighting.children.get(0).props.remove("Saturation");
+        lighting.add(new Instance("BloomEffect", "BloomEffect"));
+        assertTrue("an added BloomEffect runs the bloom pass", EngineLighting.from(root).needsPost());
+        lighting.add(new Instance("BlurEffect", "BlurEffect"));
+        assertTrue(EngineLighting.from(root).needsPost());
+    }
+
+    @Test public void outdoorAmbientFollowsTheSun() {
+        double day = EngineLighting.from(lightingWithOutdoorAmbient(12)).ambientDiffuse[0];
+        double night = EngineLighting.from(lightingWithOutdoorAmbient(0)).ambientDiffuse[0];
+        assertTrue("outdoor ambient is brighter with the sun up", day > night * 2);
+    }
+
+    /** Minimal place with only OutdoorAmbient and a clock time, used by the ambient test. */
+    private static Instance lightingWithOutdoorAmbient(double clockTime) {
+        Instance root = new Instance("DataModel", "DataModel");
+        Instance lighting = new Instance("Lighting", "Lighting");
+        lighting.props.put("OutdoorAmbient", new int[]{255, 255, 255});
+        lighting.props.put("ClockTime", clockTime);
+        root.add(lighting);
+        return root;
+    }
+
+    @Test public void lightObjectsResolveToWorldSpaceAndAreCappedAtFour() {
+        Instance root = new Instance("DataModel", "DataModel");
+        Instance workspace = new Instance("Workspace", "Workspace");
+        root.add(workspace);
+        Instance lamp = Instance.create("Part", "Lamp");
+        lamp.setPosition(10, 5, 0);
+        workspace.add(lamp);
+        Instance point = new Instance("PointLight", "PointLight");
+        point.props.put("Color", new int[]{255, 128, 0});
+        point.props.put("Brightness", 2d);
+        point.props.put("Range", 30d);
+        lamp.add(point);
+
+        EngineLighting light = EngineLighting.from(root);
+        assertEquals(1, light.lightCount);
+        assertEquals(1, light.lights.size());
+        EngineLighting.Light resolved = light.lights.get(0);
+        assertEquals(EngineLighting.POINT, resolved.kind);
+        assertEquals(10, resolved.position[0], 1e-9);
+        assertEquals(5, resolved.position[1], 1e-9);
+        assertEquals(1, resolved.color[0], 1e-9);
+        assertEquals(2, resolved.brightness, 1e-9);
+        assertEquals(30, resolved.range, 1e-9);
+        assertEquals("a point light covers the full sphere", 1, resolved.cosAngle, 1e-9);
+
+        // A SurfaceLight emits from a face centre, pointing away from that face.
+        Instance surface = new Instance("SurfaceLight", "SurfaceLight");
+        surface.props.put("Face", 1);              // Top
+        surface.props.put("Angle", 180d);
+        lamp.add(surface);
+        light = EngineLighting.from(root);
+        EngineLighting.Light top = light.lights.get(1);
+        assertEquals(EngineLighting.SURFACE, top.kind);
+        assertEquals(5.5, top.position[1], 1e-9);
+        assertEquals(1, top.direction[1], 1e-9);
+        assertEquals(Math.cos(Math.toRadians(90)), top.cosAngle, 1e-9);
+
+        // A disabled light is ignored; the 5th enabled light is reported but not shaded.
+        surface.props.put("Enabled", false);
+        for (int i = 0; i < 5; i++) {
+            Instance extra = new Instance("PointLight", "Light" + i);
+            extra.props.put("Range", 1000d);
+            lamp.add(extra);
+        }
+        light = EngineLighting.from(root);
+        assertEquals("the disabled light is skipped, so five point lights remain", 6, light.lightCount);
+        assertEquals("only four lights are shaded per frame", EngineLighting.MAX_SHADED_LIGHTS, light.lights.size());
+    }
+
+    @Test public void materialsCarryShadingValues() {
+        assertEquals("Neon", EngineMaterial.nameOf(288));
+        assertEquals(1.0, EngineMaterial.of(288).emissive, 1e-9);
+        assertEquals("Metal", EngineMaterial.nameOf(1088));
+        assertEquals(0.9, EngineMaterial.of(1088).metalness, 1e-9);
+        assertEquals("Glass", EngineMaterial.nameOf(1568));
+        assertTrue(EngineMaterial.of(1568).reflectance > 0.5);
+        assertEquals("unknown ids fall back to Plastic", "Plastic", EngineMaterial.of(123456).name);
+        assertEquals(EngineMaterial.PICKER_IDS.length, EngineMaterial.pickerNames().length);
+        assertTrue("SmoothPlastic is smoother than Concrete", EngineMaterial.of(272).roughness < EngineMaterial.of(816).roughness);
+        assertTrue("rough materials need a small specular exponent", EngineMaterial.of(1312).shininess() < EngineMaterial.of(1568).shininess());
+    }
+
+    @Test public void fixturePlaceCarriesItsLightingIntoTheEngine() throws Exception {
+        File file = writeTemp("lighting-fixture-", PlaceTemplate.generate("Place", "baseplate", 196.2, false));
+        try {
+            PlaceDecoder.Result result = PlaceDecoder.decode(file);
+            EngineLighting light = EngineLighting.from(result.root);
+            assertEquals("the template writes ClockTime 14", 14, light.clockTime, 1e-9);
+            assertEquals(2, light.brightness, 1e-9);
+            assertTrue("the fixture is lit by a high sun", light.sunGain > 0.3);
+            assertTrue("the template has no post-processing effects", !light.needsPost());
+            assertNotNull(light.summary());
+        } finally { file.delete(); }
     }
 }

@@ -1,4 +1,4 @@
-# Studio Mobile (Unofficial) 0.4.0 — Roblox Studio, shaped for Android
+# Studio Mobile (Unofficial) 0.5.0 — Roblox Studio, shaped for Android
 
 Native Android app that manages Roblox place projects **and** now opens them in a real on-device
 3D engine: Explorer hierarchy, Properties inspector, GL viewport, editing tools, and a playable
@@ -27,7 +27,7 @@ password, no third-party engine runtime.
   an upload; there is no automatic retry and no fabricated success.
 - Safe thumbnail loading from Roblox CDNs with host allow-listing and bounded decoding.
 
-### 2. Engine editor (new in 0.4.0)
+### 2. Engine editor (0.4 engine, 0.5 lighting)
 
 Open a place (project place or loose file) → **Edit**:
 
@@ -40,8 +40,27 @@ Open a place (project place or loose file) → **Edit**:
 - **Properties inspector**: Name, Position, Size, Y rotation, Color, Transparency, Material,
   Anchored, CanCollide, SpawnLocation Enabled, Workspace Gravity/Streaming. Edits apply live.
 - **Viewport**: OpenGL ES 2.0 renderer written for this app (no third-party engine). Parts render
-  with their real size, CFrame orientation and color; grid, sky, selection outline, tap-to-select
-  ray picking.
+  with their real size, CFrame orientation and color; grid, sun-lit sky, selection outline,
+  tap-to-select ray picking.
+- **Lighting and graphics (new in 0.5.0)**: the place's `Lighting` service drives the frame.
+  - **Sun and sky**: `ClockTime`/`TimeOfDay` and `GeographicLatitude` place the sun (east at 06:00,
+    highest at 12:00, west at 18:00, below the horizon at night); `Brightness` scales it and
+    `ColorShift_Top`/`ColorShift_Bottom` tint the faces that face toward and away from it.
+  - **Ambient**: `Ambient` everywhere plus `OutdoorAmbient` outdoors, with
+    `EnvironmentDiffuseScale` mixing the sky gradient in and `EnvironmentSpecularScale` scaling
+    highlights.
+  - **Fog**: linear `FogStart` → `FogEnd` in `FogColor`, disabled by the default
+    `FogEnd = 100000` exactly like Roblox.
+  - **Sky / Atmosphere / Clouds**: a `Sky` renders sun, stars and a day/night gradient; an
+    `Atmosphere` adds `Density`/`Offset`/`Haze`/`Glare`/`Decay`/`Color` haze and distance tinting;
+    a `Clouds` (under `Terrain`) draws wind-drifting procedural cloud cover.
+  - **Local lights**: `PointLight`, `SpotLight` and `SurfaceLight` illuminate nearby parts with
+    colour, `Brightness`, `Range`, `Face`/`Angle` cones and `Enabled` (four lit at a time).
+  - **Materials**: `Enum.Material` and `Reflectance` drive metalness, roughness, emissive surfaces
+    (Neon, CrackedLava, ForceField) and specular highlights.
+  - **Post-processing**: `ColorCorrectionEffect` (brightness/contrast/saturation/tint),
+    `BloomEffect`, `BlurEffect`, `SunRaysEffect` and `ExposureCompensation` run as a framebuffer
+    post pass; a `DepthOfFieldEffect` is reported in the limits dialog but not rendered yet.
 - **Tools**: move (0.5/1/4-stud nudges), rotate ±90° around Y, scale 10% steps, insert
   (Part, SpawnLocation, Folder, Model, Script, PointLight), duplicate, delete, focus, undo/redo
   (40 steps).
@@ -55,8 +74,13 @@ Open a place (project place or loose file) → **Edit**:
 ### Engine limits this beta (honest, not hidden)
 
 - Scripts do not execute yet; no `game.*` runtime. That is the next phase (script layer + assets).
+- Lighting is complete for the properties above, with four documented approximations: no shadow
+  maps (`GlobalShadows` is read and reported, faces away from the sun are simply darker), no
+  environment probe for `EnvironmentDiffuseScale`, procedural sky/clouds instead of Roblox skybox
+  and cloud textures (asset ids this build cannot download), and `DepthOfFieldEffect` is not
+  rendered. The in-app **Engine limits** dialog lists exactly this.
 - Unions/MeshParts render and collide as boxes; terrain, textures, decals, particles, animations
-  and GUIs are not drawn yet.
+  and GUIs are not drawn yet. `SurfaceAppearance`/`MaterialVariant` texture maps are not applied.
 - Rotated parts collide as axis-aligned boxes in play mode.
 - `.rbxl` files using **ZSTD** post-compression are detected and reported clearly instead of being
   half-parsed: re-save them as `.rbxlx` in desktop Studio, or wait for the ZSTD reader.
@@ -86,12 +110,15 @@ app/src/main/java/dev/falix/studiomobile/
   PlaceDecoder.java        rbxlx (XML) + rbxl (binary LZ4 chunks) decoder
   PlaceWriter.java         rbxlx serializer (round-trips unmodeled properties)
   EngineScene.java         editor/play state: selection, camera, undo, picking, character physics
-  EngineRenderer.java      OpenGL ES 2.0 viewport renderer
+  EngineLighting.java      the Lighting service model: sun/sky/atmosphere/clouds/fog/post effects
+  EngineMaterial.java      Enum.Material table (roughness/metalness/emissive/reflectance)
+  EngineRenderer.java      OpenGL ES 2.0 viewport renderer with the lighting + post pipeline
   EngineView.java          GLSurfaceView with orbit/pan/zoom and tap picking
   JoystickView.java        analog movement stick
   EngineActivity.java      editor UI: Explorer, Properties, tools, play mode, saving
 
-app/src/test/java/…        JVM tests for the engine core (LZ4, binary arrays, CFrame, ray, collision)
+app/src/test/java/…        JVM tests for the engine core (LZ4, binary arrays, CFrame, ray, collision,
+                           lighting: sun arc, ambient/fog/post-effect mapping, local lights, materials)
 tests/                     on-device QA harness (adb) and its reports
 docs/ENGINE.md             engine internals, format coverage, extension points
 docs/AI-POLICY.md          the AI contribution policy in full detail
@@ -163,7 +190,8 @@ Short version:
 - **Next: scripting layer** — Luau-ish script runtime, editing Script/ModuleScript/LocalScript
   contents in Explorer/Properties, output console, event connections.
 - **Assets**: asset browser/search, meshes/textures/decal rendering, Upload via Cloud `asset` APIs.
-- **Engine depth**: ZSTD binary reading, terrain, GUIs, materials rendering, physics constraints.
+- **Engine depth**: shadow maps and `ShadowSoftness`, skybox/`SurfaceAppearance` textures,
+  `DepthOfFieldEffect`, ZSTD binary reading, terrain, GUIs, physics constraints.
 - **Collaboration**: real Team Create presence only if an official supported API exists — never
   simulated.
 - **Quality**: instrumented tests in CI (emulator), regression screenshots, perf budget on low-end

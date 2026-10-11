@@ -22,17 +22,23 @@ final class Instance {
     boolean isA(String cls) { return className.equals(cls); }
     int childIndex() { return parent == null ? -1 : parent.children.indexOf(this); }
 
-    Instance findFirst(String cls) {
-        for (Instance c : children) { if (c.className.equals(cls)) return c; Instance r = c.findFirst(cls); if (r != null) return r; }
+    /** Deepest tree walk this build accepts; malformed or cyclic data stops instead of overflowing. */
+    static final int MAX_DEPTH = 96;
+
+    Instance findFirst(String cls) { return findFirst(cls, 0); }
+    private Instance findFirst(String cls, int depth) {
+        if (depth >= MAX_DEPTH) return null;
+        for (Instance c : children) { if (c.className.equals(cls)) return c; Instance r = c.findFirst(cls, depth + 1); if (r != null) return r; }
         return null;
     }
     ArrayList<Instance> all(String cls) {
         ArrayList<Instance> out = new ArrayList<>();
-        collect(cls, out);
+        collect(cls, out, 0);
         return out;
     }
-    private void collect(String cls, ArrayList<Instance> out) {
-        for (Instance c : children) { if (cls == null || c.className.equals(cls)) out.add(c); c.collect(cls, out); }
+    private void collect(String cls, ArrayList<Instance> out, int depth) {
+        if (depth >= MAX_DEPTH) return;
+        for (Instance c : children) { if (cls == null || c.className.equals(cls)) out.add(c); c.collect(cls, out, depth + 1); }
     }
     Instance childNamed(String n) { for (Instance c : children) if (c.name.equals(n)) return c; return null; }
     boolean isDescendantOf(Instance other) { for (Instance p = parent; p != null; p = p.parent) if (p == other) return true; return false; }

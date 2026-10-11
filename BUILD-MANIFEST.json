@@ -1,7 +1,7 @@
 {
   "app": "Studio Mobile (Unofficial)",
-  "version": "0.4.0",
-  "versionCode": 4,
+  "version": "0.5.0",
+  "versionCode": 5,
   "package": "dev.falix.studiomobile",
   "minSdk": 26,
   "targetSdk": 35,
@@ -13,15 +13,19 @@
     "decoder_xml_rbxlx": true,
     "decoder_binary_rbxl": "LZ4 chunks (META/SSTR/INST/PROP/PRNT) with structure-of-arrays values; ZSTD chunks are detected and reported as unsupported",
     "renderer": "OpenGL ES 2.0, box geometry, real size/CFrame/color",
+    "lighting": "Lighting service pipeline: ClockTime/GeographicLatitude sun, Ambient/OutdoorAmbient, ColorShift_Top/Bottom, Brightness, EnvironmentDiffuseScale/EnvironmentSpecularScale, FogStart/FogEnd/FogColor, ExposureCompensation, Enum.Material metalness/roughness/emissive/reflectance, Sky (sun/stars/gradient), Atmosphere (density/offset/haze/glare/decay/color), Clouds (cover/density/color), PointLight/SpotLight/SurfaceLight (4 shaded per frame), ColorCorrectionEffect, BloomEffect, BlurEffect, SunRaysEffect",
+    "lighting_not_rendered": "shadow maps (GlobalShadows/ShadowSoftness are read and reported), DepthOfFieldEffect, ColorGradingEffect tone mapping, Roblox skybox/cloud textures (procedural sky is drawn instead), SurfaceAppearance/MaterialVariant maps",
     "explorer_and_properties": true,
     "playable_character_and_joystick": true,
+    "editor_crash_handling": "Place decode, editor construction, GL pipeline creation and each frame catch failures and report them in-app (with the trace for startup failures) instead of crashing",
     "save_round_trips_xml": true,
     "scripts_execute": false,
     "assets_render": false,
     "zstd_binary_supported": false
   },
   "verification": {
-    "engine_unit_tests": "app/src/test/java/dev/falix/studiomobile/EngineCoreTest.java (LZ4, planar/zig-zag binary arrays, CFrame rotations, synthetic binary place decode, ray picking, character collision) - run with ./gradlew testDebugUnitTest",
+    "engine_unit_tests": "app/src/test/java/dev/falix/studiomobile/EngineCoreTest.java, 22 tests (LZ4, planar/zig-zag binary arrays, CFrame rotations, synthetic binary place decode, ray picking, character collision, lighting: sun arc and latitude, Roblox defaults, Lighting property mapping, Sky/Atmosphere/Clouds, post-effect gating, local lights, material table, fixture place lighting) - run with ./gradlew testDebugUnitTest",
+    "shader_validation": "EngineRenderer GLSL ES 1.00 sources verified with glslangValidator (10/10 shaders compile); no on-device GPU capture was possible for this host",
     "device_run_verified_for_this_version": false,
     "live_valid_key_sign_in_verified": false,
     "live_authorized_download_verified": false,
@@ -30,7 +34,7 @@
     "modern_permission_flows_verified": false,
     "SAF_provider_UI_verified": false
   },
-  "screenshots": "Only real captures are accepted. Historical QA screenshots in this repository are native View.draw captures excluding system overlays. No fabricated cloud account or device run is claimed for 0.4.0.",
+  "screenshots": "Only real captures are accepted. Historical QA screenshots in this repository are native View.draw captures excluding system overlays. No fabricated cloud account or device run is claimed for 0.5.0.",
   "ci": {
     "workflow": ".github/workflows/goyteam-apk.yml",
     "artifact": "StudioMobile-GoyTeam-v<version>-debug.apk (+ .sha256)",

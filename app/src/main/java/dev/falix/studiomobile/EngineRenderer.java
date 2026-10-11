@@ -12,61 +12,305 @@ import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
 /**
- * OpenGL ES 2.0 viewport. No third-party engine: one lit box mesh, one line program,
- * parts drawn from the Roblox data model with their real size/CFrame/color.
+ * OpenGL ES 2.0 viewport with a Roblox-shaped lighting pipeline. No third-party engine.
+ *
+ * One frame, in order:
+ *  1. procedural sky (gradient, sun disc, stars, atmosphere haze/glare, drifting clouds),
+ *  2. grid, then every renderable part shaded with the Lighting service: sun direction and
+ *     colour from ClockTime/GeographicLatitude/Brightness, ambient from Ambient +
+ *     OutdoorAmbient (+ EnvironmentDiffuseScale of the sky), ColorShift_Top/Bottom on
+ *     sun-facing/away faces, per-material roughness/metalness/emissive, EnvironmentSpecularScale,
+ *     up to four PointLight/SpotLight/SurfaceLight objects, and linear FogStart/FogEnd fog,
+ *  3. optional post pass (BlurEffect, BloomEffect, SunRaysEffect, ColorCorrectionEffect and
+ *     ExposureCompensation) through framebuffer textures; if the device cannot build them the
+ *     frame falls back to direct rendering.
+ *
+ * A GL-thread failure is reported to the activity instead of killing the process.
  */
 final class EngineRenderer implements GLSurfaceView.Renderer {
-    private final EngineScene scene;
-    private final ArrayList<Instance> frameList = new ArrayList<>();
+    interface ErrorReport { void failed(String stage, Throwable error); }
 
+    private static final int MAX_LIGHTS = EngineLighting.MAX_SHADED_LIGHTS;
+
+    private final EngineScene scene;
+    private final ErrorReport report;
+    private final ArrayList<Instance> frameList = new ArrayList<>();
+    private boolean stopped;
+
+    // ---------------------------------------------------------------- shaders
     private static final String VERT =
-            "uniform mat4 uMvp; uniform mat3 uNormal; attribute vec3 aPos; attribute vec3 aNormal; varying vec3 vNormal;\n" +
-            "void main(){ vNormal=uNormal*aNormal; gl_Position=uMvp*vec4(aPos,1.0); }";
+            "uniform mat4 uMvp; uniform mat4 uModel; uniform mat3 uNormal; attribute vec3 aPos; attribute vec3 aNormal;\n" +
+            "varying vec3 vNormal; varying vec3 vWorld;\n" +
+            "void main(){ vNormal=uNormal*aNormal; vWorld=(uModel*vec4(aPos,1.0)).xyz; gl_Position=uMvp*vec4(aPos,1.0); }";
+
     private static final String FRAG =
-            "precision mediump float; uniform vec3 uColor; uniform float uAlpha; varying vec3 vNormal;\n" +
-            "void main(){ vec3 n=normalize(vNormal); vec3 l1=normalize(vec3(0.55,0.9,0.35)); vec3 l2=normalize(vec3(-0.5,0.4,-0.7));\n" +
-            " float d=max(dot(n,l1),0.0)*0.75+max(dot(n,l2),0.0)*0.25; vec3 c=uColor*(0.55+d); gl_FragColor=vec4(c,uAlpha); }";
+            "precision mediump float;\n" +
+            "varying vec3 vNormal; varying vec3 vWorld;\n" +
+            "uniform vec3 uColor; uniform float uAlpha;\n" +
+            "uniform vec3 uAmbient; uniform vec3 uSunDir; uniform vec3 uSunColor; uniform float uSunGain;\n" +
+            "uniform vec3 uShiftTop; uniform vec3 uShiftBottom; uniform vec3 uEye;\n" +
+            "uniform float uRough; uniform float uMetal; uniform float uEmissive; uniform float uShininess;\n" +
+            "uniform float uSpecular;\n" +
+            "uniform vec3 uFogColor; uniform vec2 uFogRange; uniform float uFogEnabled;\n" +
+            "uniform vec3 uLightPos[4]; uniform vec3 uLightColor[4]; uniform vec3 uLightDir[4]; uniform vec4 uLightParams[4];\n" +
+            "uniform int uLightCount;\n" +
+            "void main(){\n" +
+            "  vec3 n = normalize(vNormal);\n" +
+            "  vec3 ambient = mix(uAmbient * 0.55, uAmbient, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));\n" +
+            "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
+            "  vec3 light = ambient + uSunColor * ndl * uSunGain;\n" +
+            "  light += uShiftTop * ndl * 0.5 + uShiftBottom * (1.0 - ndl) * 0.5;\n" +
+            "  for (int i = 0; i < 4; i++) {\n" +
+            "    float used = i < uLightCount ? 1.0 : 0.0;\n" +
+            "    vec3 toLight = uLightPos[i] - vWorld;\n" +
+            "    float dist = length(toLight);\n" +
+            "    vec3 l = toLight / max(dist, 0.0001);\n" +
+            "    float atten = clamp(1.0 - dist / max(uLightParams[i].x, 0.001), 0.0, 1.0);\n" +
+            "    atten *= atten;\n" +
+            "    float cone = 1.0;\n" +
+            "    if (uLightParams[i].y < 0.999) {\n" +
+            "      float cd = dot(-l, normalize(uLightDir[i]));\n" +
+            "      cone = smoothstep(uLightParams[i].y, uLightParams[i].y + (1.0 - uLightParams[i].y) * 0.35, cd);\n" +
+            "    }\n" +
+            "    light += uLightColor[i] * max(dot(n, l), 0.0) * atten * cone * used;\n" +
+            "  }\n" +
+            "  vec3 view = normalize(uEye - vWorld);\n" +
+            "  vec3 hv = normalize(view + uSunDir);\n" +
+            "  float spec = pow(max(dot(n, hv), 0.0), uShininess) * (1.0 - uRough * 0.5);\n" +
+            "  vec3 specColour = mix(vec3(0.04), uColor, uMetal);\n" +
+            "  vec3 col = uColor * light * (1.0 - uMetal * 0.6) + specColour * spec * uSpecular * (uSunGain * 1.1 + 0.2)\n" +
+            "           + uColor * uEmissive * 1.35;\n" +
+            "  float viewDist = length(uEye - vWorld);\n" +
+            "  float fog = uFogEnabled * clamp((viewDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.001), 0.0, 1.0);\n" +
+            "  gl_FragColor = vec4(mix(col, uFogColor, fog), uAlpha);\n" +
+            "}";
+
     private static final String LINE_VERT = "uniform mat4 uMvp; attribute vec3 aPos; void main(){ gl_Position=uMvp*vec4(aPos,1.0); }";
     private static final String LINE_FRAG = "precision mediump float; uniform vec3 uColor; uniform float uAlpha; void main(){ gl_FragColor=vec4(uColor,uAlpha); }";
 
-    private int program, lineProgram, aPos, aNormal, uMvp, uNormal, uColor, uAlpha;
-    private int lProgram, lPos, lMvp, lColor, lAlpha;
-    private FloatBuffer cubePositions, cubeNormals;
+    private static final String QUAD_VERT = "attribute vec2 aPos; varying vec2 vUv; void main(){ vUv=aPos*0.5+0.5; gl_Position=vec4(aPos,0.0,1.0); }";
+
+    private static final String SKY_FRAG =
+            "precision mediump float;\n" +
+            "varying vec2 vUv;\n" +
+            "uniform vec3 uRayTL, uRayTR, uRayBL, uRayBR;\n" +
+            "uniform vec3 uSunDir, uSunColor, uSkyTop, uSkyHorizon, uSkyGround, uAtmosphereColor, uCloudColor;\n" +
+            "uniform float uSunAngular, uStarCount, uCelestial, uDayFactor;\n" +
+            "uniform float uAtmoDensity, uAtmoHaze, uAtmoGlare, uAtmoOffset, uAtmoDecay;\n" +
+            "uniform float uCloudCover, uCloudDensity, uCloudTime;\n" +
+            "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }\n" +
+            "float noise(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n" +
+            "  return mix(mix(hash(i), hash(i+vec2(1.0,0.0)), u.x), mix(hash(i+vec2(0.0,1.0)), hash(i+vec2(1.0,1.0)), u.x), u.y); }\n" +
+            "float fbm(vec2 p){ float v=0.0, a=0.5; for (int i=0;i<4;i++){ v+=a*noise(p); p*=2.03; a*=0.5; } return v; }\n" +
+            "void main(){\n" +
+            "  vec3 dir = normalize(mix(mix(uRayBL, uRayBR, vUv.x), mix(uRayTL, uRayTR, vUv.x), vUv.y));\n" +
+            "  float h = dir.y;\n" +
+            "  vec3 col = h >= 0.0 ? mix(uSkyHorizon, uSkyTop, pow(clamp(h, 0.0, 1.0), 0.55))\n" +
+            "                      : mix(uSkyHorizon, uSkyGround, clamp(-h * 3.5, 0.0, 1.0));\n" +
+            "  float cs = max(dot(dir, uSunDir), 0.0);\n" +
+            "  float disc = uSunAngular > 0.01 ? smoothstep(cos(radians(uSunAngular)), cos(radians(uSunAngular * 0.72)), cs) : 0.0;\n" +
+            "  col += uSunColor * (disc * 1.6 + pow(cs, 90.0) * 0.5);\n" +
+            "  float haze = clamp(uAtmoHaze, 0.0, 3.0) * uAtmoDensity;\n" +
+            "  float band = clamp(1.0 - abs(h) * (1.6 + uAtmoOffset), 0.0, 1.0);\n" +
+            "  col = mix(col, uAtmosphereColor * (0.55 + 0.45 * max(h, 0.0)), clamp(haze * band * 0.9, 0.0, 1.0));\n" +
+            "  col += uAtmosphereColor * pow(cs, 8.0) * uAtmoGlare * haze * 0.8;\n" +
+            "  col = mix(col, col * uAtmosphereColor * (1.0 + uAtmoDecay), clamp((1.0 - cs) * haze * 0.15, 0.0, 0.6));\n" +
+            "  if (uCloudCover > 0.001 && h > 0.0) {\n" +
+            "    vec2 uv = dir.xz / max(h, 0.12) * 0.16 + vec2(uCloudTime * 0.006, uCloudTime * 0.004);\n" +
+            "    float mask = smoothstep(1.0 - uCloudCover, 1.0 - uCloudCover + 0.22, fbm(uv * 1.4)) * smoothstep(0.0, 0.16, h);\n" +
+            "    col = mix(col, uCloudColor * (0.72 + 0.28 * fbm(uv * 1.9)), mask * uCloudDensity);\n" +
+            "  }\n" +
+            "  if (uCelestial > 0.5 && h > 0.01 && uStarCount > 0.0) {\n" +
+            "    float s = hash(floor(dir.xz / max(h, 0.08) * 60.0));\n" +
+            "    col += vec3(step(1.0 - uStarCount / 400000.0, s) * (1.0 - uDayFactor) * smoothstep(0.0, 0.2, h) * 0.9);\n" +
+            "  }\n" +
+            "  gl_FragColor = vec4(col, 1.0);\n" +
+            "}";
+
+    private static final String BRIGHT_FRAG =
+            "precision mediump float; varying vec2 vUv; uniform sampler2D uScene; uniform float uThreshold;\n" +
+            "void main(){ vec3 c = texture2D(uScene, vUv).rgb; float l = dot(c, vec3(0.2126,0.7152,0.0722));\n" +
+            "  gl_FragColor = vec4(c * (max(l - uThreshold, 0.0) / max(l, 0.0001)), 1.0); }";
+
+    private static final String BLUR_FRAG =
+            "precision mediump float; varying vec2 vUv; uniform sampler2D uSrc; uniform vec2 uStep;\n" +
+            "void main(){ vec3 c = texture2D(uSrc, vUv).rgb * 0.227027;\n" +
+            "  c += (texture2D(uSrc, vUv + uStep * 1.384615).rgb + texture2D(uSrc, vUv - uStep * 1.384615).rgb) * 0.3162162;\n" +
+            "  c += (texture2D(uSrc, vUv + uStep * 3.230769).rgb + texture2D(uSrc, vUv - uStep * 3.230769).rgb) * 0.0702702;\n" +
+            "  gl_FragColor = vec4(c, 1.0); }";
+
+    private static final String RAYS_FRAG =
+            "precision mediump float; varying vec2 vUv; uniform sampler2D uScene; uniform vec2 uSunUv;\n" +
+            "uniform float uSpread, uIntensity;\n" +
+            "void main(){ vec2 delta = (uSunUv - vUv) * (0.35 + uSpread * 0.65); vec2 uv = vUv;\n" +
+            "  vec3 sum = vec3(0.0);\n" +
+            "  for (int i = 0; i < 20; i++) { uv += delta / 20.0; vec3 s = texture2D(uScene, uv).rgb;\n" +
+            "    sum += s * smoothstep(0.45, 1.0, dot(s, vec3(0.2126,0.7152,0.0722))); }\n" +
+            "  gl_FragColor = vec4(sum / 20.0 * uIntensity * 2.0, 1.0); }";
+
+    private static final String POST_FRAG =
+            "precision mediump float; varying vec2 vUv;\n" +
+            "uniform sampler2D uScene, uBloom, uRays;\n" +
+            "uniform float uBloomAmount, uRaysAmount, uExposure, uCcBrightness, uCcContrast, uCcSaturation;\n" +
+            "uniform vec3 uTint;\n" +
+            "void main(){ vec3 c = texture2D(uScene, vUv).rgb;\n" +
+            "  c += texture2D(uBloom, vUv).rgb * uBloomAmount;\n" +
+            "  c += texture2D(uRays, vUv).rgb * uRaysAmount;\n" +
+            "  c *= pow(2.0, uExposure);\n" +
+            "  c = (c - 0.5) * (1.0 + uCcContrast) + 0.5 + uCcBrightness;\n" +
+            "  float l = dot(c, vec3(0.2126,0.7152,0.0722));\n" +
+            "  c = mix(vec3(l), c, 1.0 + uCcSaturation) * uTint;\n" +
+            "  gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0); }";
+
+    // ---------------------------------------------------------------- programs
+    private int program, lineProgram, skyProgram, brightProgram, blurProgram, raysProgram, postProgram;
+    private int aPos, aNormal, uMvp, uModel, uNormal, uColor, uAlpha;
+    private int uAmbient, uSunDir, uSunColor, uSunGain, uShiftTop, uShiftBottom, uEye, uRough, uMetal, uEmissive, uShininess, uSpecular;
+    private int uFogColor, uFogRange, uFogEnabled, uLightPos, uLightColor, uLightDir, uLightParams, uLightCount;
+    private int lPos, lMvp, lColor, lAlpha;
+    // Each full-screen program declares its own vec2 attribute, so store one location per program.
+    private int qPos, brightPos, blurPos, raysPos, postPos;
+    private int sRayTL, sRayTR, sRayBL, sRayBR, sSunDir, sSunColor, sSkyTop, sSkyHorizon, sSkyGround, sAtmosphere, sCloudColor;
+    private int sSunAngular, sStarCount, sCelestial, sDayFactor, sAtmoDensity, sAtmoHaze, sAtmoGlare, sAtmoOffset, sAtmoDecay, sCloudCover, sCloudDensity, sCloudTime;
+    private int bScene, bThreshold, ublSrc, ublStep, rScene, rSunUv, rSpread, rIntensity, pScene, pBloom, pRays, pBloomAmount, pRaysAmount, pExposure, pCcBrightness, pCcContrast, pCcSaturation, pTint;
+
+    // ---------------------------------------------------------------- geometry
+    private FloatBuffer cubePositions, cubeNormals, gridLines, quadBuffer, outlineBuffer;
     private ShortBuffer cubeIndices;
-    private FloatBuffer gridLines;
     private int gridVertices;
-    private final float[] mProj = new float[16], mView = new float[16], mVp = new float[16], mModel = new float[16], mMvp = new float[16];
+    private float[] outlinePoints = new float[24 * 3];
+
+    private final float[] mProj = new float[16], mView = new float[16], mVp = new float[16], mModel = new float[16], mMvp = new float[16], mInvVp = new float[16];
     private final float[] normal3 = new float[9];
+    private final float[] lightPos = new float[MAX_LIGHTS * 3], lightColor = new float[MAX_LIGHTS * 3];
+    private final float[] lightDir = new float[MAX_LIGHTS * 3], lightParams = new float[MAX_LIGHTS * 4];
+    private final float[] sunUv = new float[2];
     private long lastFrame;
     private int viewportWidth = 1, viewportHeight = 1;
+    private volatile String postNote = "";
+
+    // offscreen targets for the post pass; null/0 when unavailable
+    private int sceneFbo, sceneTex, sceneDepth, scratchFbo, scratchTex, halfFbo, halfTex, halfFbo2, halfTex2;
+    private int targetWidth, targetHeight;
+    private boolean postAvailable;
 
     private static final float[] HEAD = {0.96f, 0.80f, 0.19f};
     private static final float[] TORSO = {0.05f, 0.41f, 0.82f};
     private static final float[] LIMB = {0.64f, 0.74f, 0.28f};
 
-    EngineRenderer(EngineScene scene) { this.scene = scene; }
+    EngineRenderer(EngineScene scene, ErrorReport report) { this.scene = scene; this.report = report; }
+
+    private void fail(String stage, Throwable error) {
+        if (stopped) return;
+        stopped = true;
+        android.util.Log.e("StudioMobile", "Renderer failed while " + stage, error instanceof Exception ? (Exception) error : new RuntimeException(error));
+        if (report != null) report.failed(stage, error);
+    }
 
     @Override public void onSurfaceCreated(GL10 unused, EGLConfig config) {
-        GLES20.glClearColor(0.62f, 0.76f, 0.92f, 1f);
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
-        GLES20.glEnable(GLES20.GL_BLEND);
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-        GLES20.glCullFace(GLES20.GL_BACK);
-        GLES20.glEnable(GLES20.GL_CULL_FACE);
-        program = build(VERT, FRAG);
-        aPos = GLES20.glGetAttribLocation(program, "aPos");
-        aNormal = GLES20.glGetAttribLocation(program, "aNormal");
-        uMvp = GLES20.glGetUniformLocation(program, "uMvp");
-        uNormal = GLES20.glGetUniformLocation(program, "uNormal");
-        uColor = GLES20.glGetUniformLocation(program, "uColor");
-        uAlpha = GLES20.glGetUniformLocation(program, "uAlpha");
-        lineProgram = build(LINE_VERT, LINE_FRAG);
-        lPos = GLES20.glGetAttribLocation(lineProgram, "aPos");
-        lMvp = GLES20.glGetUniformLocation(lineProgram, "uMvp");
-        lColor = GLES20.glGetUniformLocation(lineProgram, "uColor");
-        lAlpha = GLES20.glGetUniformLocation(lineProgram, "uAlpha");
-        buildCube();
-        buildGrid();
+        try {
+            GLES20.glClearColor(0.62f, 0.76f, 0.92f, 1f);
+            GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+            GLES20.glEnable(GLES20.GL_BLEND);
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+            GLES20.glCullFace(GLES20.GL_BACK);
+            GLES20.glEnable(GLES20.GL_CULL_FACE);
+
+            program = build(VERT, FRAG);
+            aPos = GLES20.glGetAttribLocation(program, "aPos");
+            aNormal = GLES20.glGetAttribLocation(program, "aNormal");
+            uMvp = GLES20.glGetUniformLocation(program, "uMvp");
+            uModel = GLES20.glGetUniformLocation(program, "uModel");
+            uNormal = GLES20.glGetUniformLocation(program, "uNormal");
+            uColor = GLES20.glGetUniformLocation(program, "uColor");
+            uAlpha = GLES20.glGetUniformLocation(program, "uAlpha");
+            uAmbient = GLES20.glGetUniformLocation(program, "uAmbient");
+            uSunDir = GLES20.glGetUniformLocation(program, "uSunDir");
+            uSunColor = GLES20.glGetUniformLocation(program, "uSunColor");
+            uSunGain = GLES20.glGetUniformLocation(program, "uSunGain");
+            uShiftTop = GLES20.glGetUniformLocation(program, "uShiftTop");
+            uShiftBottom = GLES20.glGetUniformLocation(program, "uShiftBottom");
+            uEye = GLES20.glGetUniformLocation(program, "uEye");
+            uRough = GLES20.glGetUniformLocation(program, "uRough");
+            uMetal = GLES20.glGetUniformLocation(program, "uMetal");
+            uEmissive = GLES20.glGetUniformLocation(program, "uEmissive");
+            uShininess = GLES20.glGetUniformLocation(program, "uShininess");
+            uSpecular = GLES20.glGetUniformLocation(program, "uSpecular");
+            uFogColor = GLES20.glGetUniformLocation(program, "uFogColor");
+            uFogRange = GLES20.glGetUniformLocation(program, "uFogRange");
+            uFogEnabled = GLES20.glGetUniformLocation(program, "uFogEnabled");
+            uLightPos = GLES20.glGetUniformLocation(program, "uLightPos[0]");
+            uLightColor = GLES20.glGetUniformLocation(program, "uLightColor[0]");
+            uLightDir = GLES20.glGetUniformLocation(program, "uLightDir[0]");
+            uLightParams = GLES20.glGetUniformLocation(program, "uLightParams[0]");
+            uLightCount = GLES20.glGetUniformLocation(program, "uLightCount");
+
+            lineProgram = build(LINE_VERT, LINE_FRAG);
+            lPos = GLES20.glGetAttribLocation(lineProgram, "aPos");
+            lMvp = GLES20.glGetUniformLocation(lineProgram, "uMvp");
+            lColor = GLES20.glGetUniformLocation(lineProgram, "uColor");
+            lAlpha = GLES20.glGetUniformLocation(lineProgram, "uAlpha");
+
+            skyProgram = build(QUAD_VERT, SKY_FRAG);
+            qPos = GLES20.glGetAttribLocation(skyProgram, "aPos");
+            sRayTL = GLES20.glGetUniformLocation(skyProgram, "uRayTL");
+            sRayTR = GLES20.glGetUniformLocation(skyProgram, "uRayTR");
+            sRayBL = GLES20.glGetUniformLocation(skyProgram, "uRayBL");
+            sRayBR = GLES20.glGetUniformLocation(skyProgram, "uRayBR");
+            sSunDir = GLES20.glGetUniformLocation(skyProgram, "uSunDir");
+            sSunColor = GLES20.glGetUniformLocation(skyProgram, "uSunColor");
+            sSkyTop = GLES20.glGetUniformLocation(skyProgram, "uSkyTop");
+            sSkyHorizon = GLES20.glGetUniformLocation(skyProgram, "uSkyHorizon");
+            sSkyGround = GLES20.glGetUniformLocation(skyProgram, "uSkyGround");
+            sAtmosphere = GLES20.glGetUniformLocation(skyProgram, "uAtmosphereColor");
+            sCloudColor = GLES20.glGetUniformLocation(skyProgram, "uCloudColor");
+            sSunAngular = GLES20.glGetUniformLocation(skyProgram, "uSunAngular");
+            sStarCount = GLES20.glGetUniformLocation(skyProgram, "uStarCount");
+            sCelestial = GLES20.glGetUniformLocation(skyProgram, "uCelestial");
+            sDayFactor = GLES20.glGetUniformLocation(skyProgram, "uDayFactor");
+            sAtmoDensity = GLES20.glGetUniformLocation(skyProgram, "uAtmoDensity");
+            sAtmoHaze = GLES20.glGetUniformLocation(skyProgram, "uAtmoHaze");
+            sAtmoGlare = GLES20.glGetUniformLocation(skyProgram, "uAtmoGlare");
+            sAtmoOffset = GLES20.glGetUniformLocation(skyProgram, "uAtmoOffset");
+            sAtmoDecay = GLES20.glGetUniformLocation(skyProgram, "uAtmoDecay");
+            sCloudCover = GLES20.glGetUniformLocation(skyProgram, "uCloudCover");
+            sCloudDensity = GLES20.glGetUniformLocation(skyProgram, "uCloudDensity");
+            sCloudTime = GLES20.glGetUniformLocation(skyProgram, "uCloudTime");
+
+            brightProgram = build(QUAD_VERT, BRIGHT_FRAG);
+            brightPos = GLES20.glGetAttribLocation(brightProgram, "aPos");
+            bScene = GLES20.glGetUniformLocation(brightProgram, "uScene");
+            bThreshold = GLES20.glGetUniformLocation(brightProgram, "uThreshold");
+            blurProgram = build(QUAD_VERT, BLUR_FRAG);
+            blurPos = GLES20.glGetAttribLocation(blurProgram, "aPos");
+            ublSrc = GLES20.glGetUniformLocation(blurProgram, "uSrc");
+            ublStep = GLES20.glGetUniformLocation(blurProgram, "uStep");
+            raysProgram = build(QUAD_VERT, RAYS_FRAG);
+            raysPos = GLES20.glGetAttribLocation(raysProgram, "aPos");
+            rScene = GLES20.glGetUniformLocation(raysProgram, "uScene");
+            rSunUv = GLES20.glGetUniformLocation(raysProgram, "uSunUv");
+            rSpread = GLES20.glGetUniformLocation(raysProgram, "uSpread");
+            rIntensity = GLES20.glGetUniformLocation(raysProgram, "uIntensity");
+            postProgram = build(QUAD_VERT, POST_FRAG);
+            postPos = GLES20.glGetAttribLocation(postProgram, "aPos");
+            pScene = GLES20.glGetUniformLocation(postProgram, "uScene");
+            pBloom = GLES20.glGetUniformLocation(postProgram, "uBloom");
+            pRays = GLES20.glGetUniformLocation(postProgram, "uRays");
+            pBloomAmount = GLES20.glGetUniformLocation(postProgram, "uBloomAmount");
+            pRaysAmount = GLES20.glGetUniformLocation(postProgram, "uRaysAmount");
+            pExposure = GLES20.glGetUniformLocation(postProgram, "uExposure");
+            pCcBrightness = GLES20.glGetUniformLocation(postProgram, "uCcBrightness");
+            pCcContrast = GLES20.glGetUniformLocation(postProgram, "uCcContrast");
+            pCcSaturation = GLES20.glGetUniformLocation(postProgram, "uCcSaturation");
+            pTint = GLES20.glGetUniformLocation(postProgram, "uTint");
+
+            buildCube();
+            buildGrid();
+            buildQuad();
+            releaseTargets();
+        } catch (Throwable t) {
+            fail("creating the GL pipeline", t);
+        }
     }
 
     private static int build(String vertex, String fragment) {
@@ -76,6 +320,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glShaderSource(fs, fragment); GLES20.glCompileShader(fs);
         int p = GLES20.glCreateProgram();
         GLES20.glAttachShader(p, vs); GLES20.glAttachShader(p, fs); GLES20.glLinkProgram(p);
+        GLES20.glDeleteShader(vs);
+        GLES20.glDeleteShader(fs);
         return p;
     }
 
@@ -119,6 +365,11 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         gridLines = floatBuffer(java.util.Arrays.copyOf(out, i));
     }
 
+    /** Full-screen triangle strip: the sky and every post pass reuse this quad. */
+    private void buildQuad() {
+        quadBuffer = floatBuffer(new float[]{-1, -1, 1, -1, -1, 1, 1, 1});
+    }
+
     private static FloatBuffer floatBuffer(float[] data) {
         FloatBuffer b = ByteBuffer.allocateDirect(data.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
         b.put(data).position(0);
@@ -134,39 +385,162 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         viewportWidth = Math.max(1, width);
         viewportHeight = Math.max(1, height);
         GLES20.glViewport(0, 0, width, height);
+        releaseTargets();
     }
 
+    // ---------------------------------------------------------------- frame
     @Override public void onDrawFrame(GL10 unused) {
-        long now = System.nanoTime();
-        double dt = lastFrame == 0 ? 0 : (now - lastFrame) / 1e9;
-        lastFrame = now;
-        if (scene.playing) scene.step(dt);
+        if (stopped) return;
+        try {
+            long now = System.nanoTime();
+            double dt = lastFrame == 0 ? 0 : (now - lastFrame) / 1e9;
+            lastFrame = now;
+            if (scene.playing) scene.step(dt);
 
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
-        scene.updateEye();
-        float aspect = (float) viewportWidth / viewportHeight;
-        Matrix.perspectiveM(mProj, 0, 60f, aspect, 0.1f, 4000f);
-        Matrix.setLookAtM(mView, 0, (float) scene.camEye[0], (float) scene.camEye[1], (float) scene.camEye[2],
-                (float) scene.camTarget[0], (float) scene.camTarget[1], (float) scene.camTarget[2], 0, 1, 0);
-        Matrix.multiplyMM(mVp, 0, mProj, 0, mView, 0);
+            EngineLighting light;
+            synchronized (scene) {
+                if (scene.cacheVersion != scene.version) scene.refreshCache();
+                light = scene.lighting;
+                frameList.clear();
+                frameList.addAll(scene.renderList);
+            }
+            if (light == null) light = EngineLighting.from(null);
 
-        synchronized (scene) {
-            if (scene.cacheVersion != scene.version) scene.refreshCache();
-            frameList.clear();
-            frameList.addAll(scene.renderList);
+            scene.updateEye();
+            float aspect = (float) viewportWidth / viewportHeight;
+            Matrix.perspectiveM(mProj, 0, 60f, aspect, 0.1f, 4000f);
+            Matrix.setLookAtM(mView, 0, (float) scene.camEye[0], (float) scene.camEye[1], (float) scene.camEye[2],
+                    (float) scene.camTarget[0], (float) scene.camTarget[1], (float) scene.camTarget[2], 0, 1, 0);
+            Matrix.multiplyMM(mVp, 0, mProj, 0, mView, 0);
+
+            boolean post = light.needsPost() && ensureTargets(viewportWidth, viewportHeight);
+            if (post) {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, sceneFbo);
+                GLES20.glViewport(0, 0, viewportWidth, viewportHeight);
+            } else {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+                GLES20.glViewport(0, 0, viewportWidth, viewportHeight);
+            }
+
+            GLES20.glClearColor((float) light.skyHorizon[0], (float) light.skyHorizon[1], (float) light.skyHorizon[2], 1f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
+
+            drawSky(light);
+            drawGrid(light);
+
+            GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+            GLES20.glEnable(GLES20.GL_BLEND);
+            setGlobalLighting(light);
+            for (Instance part : frameList) drawPart(part, light);
+            Instance selected = scene.selection;
+            if (selected != null && selected.isRenderable()) drawOutline(selected);
+            if (scene.playing) drawCharacter(light);
+
+            if (post) composite(light);
+        } catch (Throwable t) {
+            fail("drawing a frame", t);
         }
-
-        drawGrid();
-        for (Instance part : frameList) drawPart(part);
-        Instance selected = scene.selection;
-        if (selected != null && selected.isRenderable()) drawOutline(selected);
-        if (scene.playing) drawCharacter();
     }
 
-    private void drawGrid() {
+    /** Uploads everything from the Lighting service that is the same for every part this frame. */
+    private void setGlobalLighting(EngineLighting light) {
+        GLES20.glUseProgram(program);
+        GLES20.glUniform3f(uAmbient, (float) light.ambientDiffuse[0], (float) light.ambientDiffuse[1], (float) light.ambientDiffuse[2]);
+        GLES20.glUniform3f(uSunDir, (float) light.sunDirection[0], (float) light.sunDirection[1], (float) light.sunDirection[2]);
+        GLES20.glUniform3f(uSunColor, (float) light.sunColor[0], (float) light.sunColor[1], (float) light.sunColor[2]);
+        GLES20.glUniform1f(uSunGain, (float) light.sunGain);
+        GLES20.glUniform3f(uShiftTop, (float) light.colorShiftTop[0], (float) light.colorShiftTop[1], (float) light.colorShiftTop[2]);
+        GLES20.glUniform3f(uShiftBottom, (float) light.colorShiftBottom[0], (float) light.colorShiftBottom[1], (float) light.colorShiftBottom[2]);
+        GLES20.glUniform3f(uEye, (float) scene.camEye[0], (float) scene.camEye[1], (float) scene.camEye[2]);
+        GLES20.glUniform3f(uFogColor, (float) light.fogTint[0], (float) light.fogTint[1], (float) light.fogTint[2]);
+        GLES20.glUniform2f(uFogRange, (float) light.fogStart, (float) light.fogEnd);
+        GLES20.glUniform1f(uFogEnabled, light.fogEnabled ? 1f : 0f);
+
+        int count = 0;
+        for (EngineLighting.Light local : light.lights) {
+            if (count >= MAX_LIGHTS) break;
+            lightPos[count * 3] = (float) local.position[0];
+            lightPos[count * 3 + 1] = (float) local.position[1];
+            lightPos[count * 3 + 2] = (float) local.position[2];
+            lightColor[count * 3] = (float) (local.color[0] * local.brightness);
+            lightColor[count * 3 + 1] = (float) (local.color[1] * local.brightness);
+            lightColor[count * 3 + 2] = (float) (local.color[2] * local.brightness);
+            lightDir[count * 3] = (float) local.direction[0];
+            lightDir[count * 3 + 1] = (float) local.direction[1];
+            lightDir[count * 3 + 2] = (float) local.direction[2];
+            lightParams[count * 4] = (float) local.range;
+            lightParams[count * 4 + 1] = (float) local.cosAngle;
+            lightParams[count * 4 + 2] = local.kind;
+            lightParams[count * 4 + 3] = 1f;
+            count++;
+        }
+        GLES20.glUniform3fv(uLightPos, MAX_LIGHTS, lightPos, 0);
+        GLES20.glUniform3fv(uLightColor, MAX_LIGHTS, lightColor, 0);
+        GLES20.glUniform3fv(uLightDir, MAX_LIGHTS, lightDir, 0);
+        GLES20.glUniform4fv(uLightParams, MAX_LIGHTS, lightParams, 0);
+        GLES20.glUniform1i(uLightCount, count);
+    }
+
+    // ---------------------------------------------------------------- sky
+    private void drawSky(EngineLighting light) {
+        if (!Matrix.invertM(mInvVp, 0, mVp, 0)) return;
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDepthMask(false);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glUseProgram(skyProgram);
+        float[][] corners = {{-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+        int[] locations = {sRayBL, sRayBR, sRayTL, sRayTR};
+        for (int i = 0; i < 4; i++) {
+            float[] ray = unproject(corners[i][0], corners[i][1]);
+            GLES20.glUniform3f(locations[i], ray[0], ray[1], ray[2]);
+        }
+        GLES20.glUniform3f(sSunDir, (float) light.sunDirection[0], (float) light.sunDirection[1], (float) light.sunDirection[2]);
+        GLES20.glUniform3f(sSunColor, (float) light.sunColor[0], (float) light.sunColor[1], (float) light.sunColor[2]);
+        GLES20.glUniform3f(sSkyTop, (float) light.skyTop[0], (float) light.skyTop[1], (float) light.skyTop[2]);
+        GLES20.glUniform3f(sSkyHorizon, (float) light.skyHorizon[0], (float) light.skyHorizon[1], (float) light.skyHorizon[2]);
+        GLES20.glUniform3f(sSkyGround, (float) light.skyGround[0], (float) light.skyGround[1], (float) light.skyGround[2]);
+        GLES20.glUniform3f(sAtmosphere, (float) light.atmosphereColor[0], (float) light.atmosphereColor[1], (float) light.atmosphereColor[2]);
+        GLES20.glUniform3f(sCloudColor, (float) light.cloudColor[0], (float) light.cloudColor[1], (float) light.cloudColor[2]);
+        GLES20.glUniform1f(sSunAngular, (float) (light.celestialBodiesShown ? light.sunAngularSize : 0));
+        GLES20.glUniform1f(sStarCount, (float) light.starCount);
+        GLES20.glUniform1f(sCelestial, light.celestialBodiesShown ? 1f : 0f);
+        GLES20.glUniform1f(sDayFactor, (float) light.dayFactor);
+        GLES20.glUniform1f(sAtmoDensity, (float) (light.atmosphere ? light.atmosphereDensity : 0));
+        GLES20.glUniform1f(sAtmoHaze, (float) light.atmosphereHaze);
+        GLES20.glUniform1f(sAtmoGlare, (float) light.atmosphereGlare);
+        GLES20.glUniform1f(sAtmoOffset, (float) light.atmosphereOffset);
+        GLES20.glUniform1f(sAtmoDecay, (float) light.atmosphereDecay);
+        GLES20.glUniform1f(sCloudCover, light.clouds ? (float) light.cloudCover : 0f);
+        GLES20.glUniform1f(sCloudDensity, (float) light.cloudDensity);
+        GLES20.glUniform1f(sCloudTime, (float) ((System.nanoTime() / 1e9) % 3600));
+        GLES20.glEnableVertexAttribArray(qPos);
+        GLES20.glVertexAttribPointer(qPos, 2, GLES20.GL_FLOAT, false, 0, quadBuffer);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(qPos);
+        GLES20.glDepthMask(true);
+    }
+
+    /** World-space ray through a normalized device point on the far plane. */
+    private float[] unproject(float ndcX, float ndcY) {
+        float[] p = new float[4];
+        p[0] = mInvVp[0] * ndcX + mInvVp[4] * ndcY + mInvVp[8] + mInvVp[12];
+        p[1] = mInvVp[1] * ndcX + mInvVp[5] * ndcY + mInvVp[9] + mInvVp[13];
+        p[2] = mInvVp[2] * ndcX + mInvVp[6] * ndcY + mInvVp[10] + mInvVp[14];
+        p[3] = mInvVp[3] * ndcX + mInvVp[7] * ndcY + mInvVp[11] + mInvVp[15];
+        float w = Math.abs(p[3]) < 1e-6f ? 1e-6f : p[3];
+        float x = p[0] / w - (float) scene.camEye[0];
+        float y = p[1] / w - (float) scene.camEye[1];
+        float z = p[2] / w - (float) scene.camEye[2];
+        float len = (float) Math.sqrt(x * x + y * y + z * z);
+        if (len < 1e-6f) return new float[]{0, 1, 0};
+        return new float[]{x / len, y / len, z / len};
+    }
+
+    private void drawGrid(EngineLighting light) {
         GLES20.glUseProgram(lineProgram);
         GLES20.glUniformMatrix4fv(lMvp, 1, false, mVp, 0);
-        GLES20.glUniform3f(lColor, 0.42f, 0.46f, 0.52f);
+        float tone = (float) (0.12 + 0.34 * light.dayFactor);
+        GLES20.glUniform3f(lColor, tone, tone * 1.06f, tone * 1.22f);
         GLES20.glUniform1f(lAlpha, 0.4f);
         GLES20.glEnableVertexAttribArray(lPos);
         GLES20.glVertexAttribPointer(lPos, 3, GLES20.GL_FLOAT, false, 0, gridLines);
@@ -174,7 +548,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisableVertexAttribArray(lPos);
     }
 
-    private void drawPart(Instance part) {
+    // ---------------------------------------------------------------- parts
+    private void drawPart(Instance part, EngineLighting light) {
         double[] c = part.cframe();
         double[] s = part.size();
         float sx = (float) Math.max(0.02, Math.abs(s[0])), sy = (float) Math.max(0.02, Math.abs(s[1])), sz = (float) Math.max(0.02, Math.abs(s[2]));
@@ -185,7 +560,10 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         if (part.className.equals("SpawnLocation")) { r = 0.13f; g = 0.62f; b = 0.29f; alpha = Math.max(alpha, 0.92f); }
         if (alpha < 0.03f) return;
         boolean hot = part == scene.selection;
-        drawBox(hot ? Math.min(1, r * 1.25f + 0.05f) : r, hot ? Math.min(1, g * 1.25f + 0.05f) : g, hot ? Math.min(1, b * 1.25f + 0.05f) : b, hot ? Math.max(alpha, 0.85f) : alpha);
+        if (hot) { r = Math.min(1, r * 1.25f + 0.05f); g = Math.min(1, g * 1.25f + 0.05f); b = Math.min(1, b * 1.25f + 0.05f); alpha = Math.max(alpha, 0.85f); }
+        EngineMaterial material = EngineMaterial.of(part.getInt("Material", 256));
+        double reflectance = Math.max(0, Math.min(1, part.getNumber("Reflectance", 0))) + material.reflectance;
+        drawBox(r, g, b, alpha, material, light.specularScale + reflectance);
     }
 
     private void setModel(double[] c, float sx, float sy, float sz) {
@@ -202,12 +580,18 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         normal3[6] = r02; normal3[7] = r12; normal3[8] = r22;
     }
 
-    private void drawBox(float r, float g, float b, float alpha) {
+    private void drawBox(float r, float g, float b, float alpha, EngineMaterial material, double specular) {
         GLES20.glUseProgram(program);
         GLES20.glUniformMatrix4fv(uMvp, 1, false, mMvp, 0);
+        GLES20.glUniformMatrix4fv(uModel, 1, false, mModel, 0);
         GLES20.glUniformMatrix3fv(uNormal, 1, false, normal3, 0);
         GLES20.glUniform3f(uColor, r, g, b);
         GLES20.glUniform1f(uAlpha, alpha);
+        GLES20.glUniform1f(uRough, (float) material.roughness);
+        GLES20.glUniform1f(uMetal, (float) material.metalness);
+        GLES20.glUniform1f(uEmissive, (float) material.emissive);
+        GLES20.glUniform1f(uShininess, (float) material.shininess());
+        GLES20.glUniform1f(uSpecular, (float) specular);
         GLES20.glEnableVertexAttribArray(aPos);
         GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
         GLES20.glEnableVertexAttribArray(aNormal);
@@ -226,8 +610,9 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
                 -hx, hy, -hz, hx, hy, -hz, hx, hy, -hz, hx, hy, hz, hx, hy, hz, -hx, hy, hz, -hx, hy, hz, -hx, hy, -hz,
                 -hx, -hy, -hz, -hx, hy, -hz, hx, -hy, -hz, hx, hy, -hz, hx, -hy, hz, hx, hy, hz, -hx, -hy, hz, -hx, hy, hz
         };
+        System.arraycopy(pts, 0, outlinePoints, 0, pts.length);
         setModel(c, 1, 1, 1);
-        FloatBuffer buf = floatBuffer(pts);
+        FloatBuffer buf = floatBuffer(outlinePoints);
         GLES20.glUseProgram(lineProgram);
         GLES20.glUniformMatrix4fv(lMvp, 1, false, mMvp, 0);
         GLES20.glUniform3f(lColor, 0.25f, 0.55f, 1f);
@@ -240,24 +625,219 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glLineWidth(1f);
     }
 
-    private void drawCharacter() {
+    private void drawCharacter(EngineLighting light) {
         double[] p = scene.charPos;
         double yaw = scene.charYaw;
         float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
-        charBox(p, cy, sy, 0, 3f, 0, 2, 2, 1, TORSO);        // torso
-        charBox(p, cy, sy, 0, 4.63f, 0, 1.25f, 1.25f, 1.25f, HEAD);
-        charBox(p, cy, sy, -1.5f, 3f, 0, 1, 2, 1, LIMB);     // arms
-        charBox(p, cy, sy, 1.5f, 3f, 0, 1, 2, 1, LIMB);
-        charBox(p, cy, sy, -0.55f, 1f, 0, 1, 2, 1, LIMB);    // legs
-        charBox(p, cy, sy, 0.55f, 1f, 0, 1, 2, 1, LIMB);
+        EngineMaterial skin = EngineMaterial.of(256);
+        charBox(p, cy, sy, 0, 3f, 0, 2, 2, 1, TORSO, skin, light);
+        charBox(p, cy, sy, 0, 4.63f, 0, 1.25f, 1.25f, 1.25f, HEAD, skin, light);
+        charBox(p, cy, sy, -1.5f, 3f, 0, 1, 2, 1, LIMB, skin, light);
+        charBox(p, cy, sy, 1.5f, 3f, 0, 1, 2, 1, LIMB, skin, light);
+        charBox(p, cy, sy, -0.55f, 1f, 0, 1, 2, 1, LIMB, skin, light);
+        charBox(p, cy, sy, 0.55f, 1f, 0, 1, 2, 1, LIMB, skin, light);
     }
 
-    private void charBox(double[] origin, float cy, float sy, float ox, float oyAboveFeet, float oz, float w, float h, float d, float[] color) {
+    private void charBox(double[] origin, float cy, float sy, float ox, float oyAboveFeet, float oz, float w, float h, float d, float[] color, EngineMaterial material, EngineLighting light) {
         double wx = origin[0] + (ox * cy + oz * sy);
         double wz = origin[2] + (-ox * sy + oz * cy);
         double wy = origin[1] - scene.charHy + oyAboveFeet;
         double[] c = {wx, wy, wz, cy, 0, sy, 0, 1, 0, -sy, 0, cy};
         setModel(c, w, h, d);
-        drawBox(color[0], color[1], color[2], 1f);
+        drawBox(color[0], color[1], color[2], 1f, material, light.specularScale);
     }
+
+    // ---------------------------------------------------------------- post pass
+    /** Frees the GL objects behind the post pass. */
+    private void deleteTargets() {
+        if (sceneTex != 0) {
+            GLES20.glDeleteTextures(4, new int[]{sceneTex, scratchTex, halfTex, halfTex2}, 0);
+            GLES20.glDeleteFramebuffers(4, new int[]{sceneFbo, scratchFbo, halfFbo, halfFbo2}, 0);
+            GLES20.glDeleteRenderbuffers(1, new int[]{sceneDepth}, 0);
+        }
+        sceneFbo = scratchFbo = halfFbo = halfFbo2 = 0;
+        sceneTex = scratchTex = halfTex = halfTex2 = sceneDepth = 0;
+    }
+
+    private void releaseTargets() {
+        deleteTargets();
+        targetWidth = targetHeight = 0;
+        postAvailable = false;
+    }
+
+    /**
+     * Builds the colour/depth targets the post pass needs and returns whether they can be used.
+     * The size is remembered even when the build fails, so an unsupported GPU is not retried every
+     * frame; a resize clears it and the pass is attempted once more.
+     */
+    private boolean ensureTargets(int width, int height) {
+        if (targetWidth == width && targetHeight == height) return postAvailable;
+        releaseTargets();
+        targetWidth = width;
+        targetHeight = height;
+        int halfW = Math.max(1, width / 2), halfH = Math.max(1, height / 2);
+        try {
+            sceneTex = texture(width, height);
+            scratchTex = texture(width, height);
+            halfTex = texture(halfW, halfH);
+            halfTex2 = texture(halfW, halfH);
+            sceneFbo = framebuffer(sceneTex);
+            scratchFbo = framebuffer(scratchTex);
+            halfFbo = framebuffer(halfTex);
+            halfFbo2 = framebuffer(halfTex2);
+
+            int[] rbs = new int[1];
+            GLES20.glGenRenderbuffers(1, rbs, 0);
+            sceneDepth = rbs[0];
+            GLES20.glBindRenderbuffer(GLES20.GL_RENDERBUFFER, sceneDepth);
+            GLES20.glRenderbufferStorage(GLES20.GL_RENDERBUFFER, GLES20.GL_DEPTH_COMPONENT16, width, height);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, sceneFbo);
+            GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_DEPTH_ATTACHMENT, GLES20.GL_RENDERBUFFER, sceneDepth);
+
+            postAvailable = complete(sceneFbo) && complete(scratchFbo) && complete(halfFbo) && complete(halfFbo2);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        } catch (Throwable t) {
+            postNote = "post-processing unavailable on this device: " + t.getClass().getSimpleName();
+            deleteTargets();
+            return false;
+        }
+        if (!postAvailable) {
+            postNote = "post-processing unavailable on this GPU; effects stored in Lighting are not applied.";
+            deleteTargets();
+        }
+        return postAvailable;
+    }
+
+    private static int texture(int width, int height) {
+        int[] ids = new int[1];
+        GLES20.glGenTextures(1, ids, 0);
+        int id = ids[0];
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id);
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, width, height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        return id;
+    }
+
+    private static int framebuffer(int tex) {
+        int[] ids = new int[1];
+        GLES20.glGenFramebuffers(1, ids, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, ids[0]);
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, tex, 0);
+        return ids[0];
+    }
+
+    private static boolean complete(int fbo) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo);
+        return GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE;
+    }
+
+    private void drawQuad(int attrib) {
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glEnableVertexAttribArray(attrib);
+        GLES20.glVertexAttribPointer(attrib, 2, GLES20.GL_FLOAT, false, 0, quadBuffer);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(attrib);
+    }
+
+    private static void bindTexture(int unit, int tex) {
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex);
+    }
+
+    /** Separable gaussian into another target: source must not be the current render target. */
+    private void blurPass(int sourceTex, int destFbo, int width, int height, float dx, float dy) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destFbo);
+        GLES20.glViewport(0, 0, width, height);
+        GLES20.glUseProgram(blurProgram);
+        GLES20.glUniform1i(ublSrc, 0);
+        bindTexture(0, sourceTex);
+        GLES20.glUniform2f(ublStep, dx, dy);
+        drawQuad(blurPos);
+    }
+
+    /** Applies the Lighting service's post-processing effects to the rendered frame. */
+    private void composite(EngineLighting light) {
+        int width = viewportWidth, height = viewportHeight;
+        int halfW = Math.max(1, width / 2), halfH = Math.max(1, height / 2);
+
+        // BlurEffect: gaussian over the whole frame before anything else reads it.
+        if (light.blur && light.blurSize > 0.5) {
+            float radius = (float) Math.max(1, Math.min(56, light.blurSize)) * 0.5f;
+            blurPass(sceneTex, scratchFbo, width, height, radius / width, 0);
+            blurPass(scratchTex, sceneFbo, width, height, 0, radius / height);
+            if (light.blurSize > 24) {
+                radius *= 0.5;
+                blurPass(sceneTex, scratchFbo, width, height, radius / width, 0);
+                blurPass(scratchTex, sceneFbo, width, height, 0, radius / height);
+            }
+        }
+
+        boolean bloomWanted = light.bloom && light.bloomIntensity > 0.001;
+        boolean raysWanted = light.sunRays && light.sunRaysIntensity > 0.001 && light.sunUp > 0.05 && sunOnScreen(light);
+        if (bloomWanted) {
+            // Roblox authors BloomEffect.Threshold against an HDR frame; this LDR pass scales it in.
+            float threshold = (float) Math.max(0.25, Math.min(0.95, light.bloomThreshold / 2.2));
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, halfFbo);
+            GLES20.glViewport(0, 0, halfW, halfH);
+            GLES20.glUseProgram(brightProgram);
+            GLES20.glUniform1i(bScene, 0);
+            bindTexture(0, sceneTex);
+            GLES20.glUniform1f(bThreshold, threshold);
+            drawQuad(brightPos);
+            float radius = (float) Math.max(1, Math.min(56, light.bloomSize)) * 0.35f;
+            blurPass(halfTex, halfFbo2, halfW, halfH, radius / halfW, 0);
+            blurPass(halfTex2, halfFbo, halfW, halfH, 0, radius / halfH);
+        }
+        if (raysWanted) {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, halfFbo2);
+            GLES20.glViewport(0, 0, halfW, halfH);
+            GLES20.glUseProgram(raysProgram);
+            GLES20.glUniform1i(rScene, 0);
+            bindTexture(0, sceneTex);
+            GLES20.glUniform2f(rSunUv, sunUv[0], sunUv[1]);
+            GLES20.glUniform1f(rSpread, (float) light.sunRaysSpread);
+            GLES20.glUniform1f(rIntensity, (float) light.sunRaysIntensity);
+            drawQuad(raysPos);
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glViewport(0, 0, width, height);
+        GLES20.glUseProgram(postProgram);
+        GLES20.glUniform1i(pScene, 0);
+        GLES20.glUniform1i(pBloom, 1);
+        GLES20.glUniform1i(pRays, 2);
+        bindTexture(0, sceneTex);
+        bindTexture(1, halfTex);
+        bindTexture(2, halfTex2);
+        GLES20.glUniform1f(pBloomAmount, bloomWanted ? (float) light.bloomIntensity : 0f);
+        GLES20.glUniform1f(pRaysAmount, raysWanted ? (float) light.sunRaysIntensity : 0f);
+        GLES20.glUniform1f(pExposure, (float) light.exposureCompensation);
+        boolean cc = light.colorCorrection && light.ccEnabled;
+        GLES20.glUniform1f(pCcBrightness, cc ? (float) light.ccBrightness : 0f);
+        GLES20.glUniform1f(pCcContrast, cc ? (float) light.ccContrast : 0f);
+        GLES20.glUniform1f(pCcSaturation, cc ? (float) light.ccSaturation : 0f);
+        GLES20.glUniform3f(pTint, cc ? (float) light.ccTint[0] : 1f, cc ? (float) light.ccTint[1] : 1f, cc ? (float) light.ccTint[2] : 1f);
+        drawQuad(postPos);
+    }
+
+    /** Projects the sun into screen space for the sun-rays pass. */
+    private boolean sunOnScreen(EngineLighting light) {
+        double[] eye = scene.camEye;
+        double px = eye[0] + light.sunDirection[0] * 2000, py = eye[1] + light.sunDirection[1] * 2000, pz = eye[2] + light.sunDirection[2] * 2000;
+        float cx = mVp[0] * (float) px + mVp[4] * (float) py + mVp[8] * (float) pz + mVp[12];
+        float cy = mVp[1] * (float) px + mVp[5] * (float) py + mVp[9] * (float) pz + mVp[13];
+        float cw = mVp[3] * (float) px + mVp[7] * (float) py + mVp[11] * (float) pz + mVp[15];
+        if (cw <= 0.001f) return false;
+        float u = cx / cw * 0.5f + 0.5f, v = cy / cw * 0.5f + 0.5f;
+        sunUv[0] = u;
+        sunUv[1] = v;
+        return u > -0.35f && u < 1.35f && v > -0.35f && v < 1.35f;
+    }
+
+    /** Reason the post pass is unavailable, or an empty string when it works. */
+    String postNote() { return postNote; }
 }

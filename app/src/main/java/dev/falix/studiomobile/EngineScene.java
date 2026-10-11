@@ -38,6 +38,8 @@ final class EngineScene {
 
     // ---- caches
     int cacheVersion = -1;
+    /** Roblox Lighting/Sky/Atmosphere/Clouds/post-effects for this place; rebuilt with the cache. */
+    volatile EngineLighting lighting = EngineLighting.from(null);
     final ArrayList<Instance> renderList = new ArrayList<>();
     final ArrayList<double[]> colliders = new ArrayList<>();   // {cx,cy,cz,hx,hy,hz}
     final ArrayList<Instance> colliderOwners = new ArrayList<>();
@@ -61,6 +63,7 @@ final class EngineScene {
     synchronized void markDirty() { version++; }
 
     synchronized void refreshCache() {
+        lighting = EngineLighting.from(root);
         renderList.clear();
         colliders.clear();
         colliderOwners.clear();
@@ -176,7 +179,13 @@ final class EngineScene {
         redoStack.clear();
     }
 
-    static int count(Instance node) { int n = 1; for (Instance child : node.children) n += count(child); return n; }
+    static int count(Instance node) { return count(node, 0); }
+    static int count(Instance node, int depth) {
+        if (depth >= Instance.MAX_DEPTH) return 0;
+        int n = 1;
+        for (Instance child : node.children) n += count(child, depth + 1);
+        return n;
+    }
 
     synchronized String capture() {
         Instance copy = root;

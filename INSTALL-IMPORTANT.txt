@@ -1,10 +1,14 @@
-IMPORTANT — Studio Mobile 0.4.0 installation
+IMPORTANT — Studio Mobile 0.5.0 installation
 
 This is an unofficial, test-signed Android 8+ sideload build.
 The original v0.2 signing key was unavailable. This APK has a NEW certificate and cannot install directly over v0.2.
 BEFORE uninstalling v0.2, back up Documents/StudioMobile and any chosen project folder. Keep your creator key privately. Then uninstall v0.2, extract/install this APK, re-grant storage access and reconnect. Uninstall clears credentials/settings; back up files first.
 
-0.4.0 adds the on-device editor: open a project place or a loose .rbxl/.rbxlx and use Edit for the 3D viewport, Explorer, Properties and playable character with joystick. Saving writes the place back on device. Scripts do not run yet; ZSTD-compressed .rbxl files are reported as unsupported instead of being half-read.
+0.4.0 added the on-device editor: open a project place or a loose .rbxl/.rbxlx and use Edit for the 3D viewport, Explorer, Properties and playable character with joystick.
+
+0.5.0 adds the Roblox lighting and graphics pipeline to that editor. The viewport reads the place's Lighting service: ClockTime and GeographicLatitude drive the sun, and Ambient, OutdoorAmbient, ColorShift_Top/Bottom, Brightness, FogStart/FogEnd/FogColor, EnvironmentDiffuseScale and EnvironmentSpecularScale all shade the scene. PointLight, SpotLight and SurfaceLight objects light nearby parts (four at a time), Enum.Material sets metalness/roughness/emissive, and ColorCorrectionEffect, BloomEffect, BlurEffect, SunRaysEffect, Atmosphere, Clouds and ExposureCompensation are applied. Skyboxes are drawn as a procedural gradient because Roblox skybox textures are assets this build cannot download; shadow maps and DepthOfField are not rendered yet, and the in-app "Engine limits" dialog says so. If a place cannot be decoded or the GL surface fails, the editor shows the reason in-app instead of crashing.
+
+Saving writes the place back on device. Scripts do not run yet; ZSTD-compressed .rbxl files are reported as unsupported instead of being half-read.
 
 No Roblox password or security cookie is needed. Never share API keys in chat.
 Publishing overwrites an EXISTING linked cloud place only, using universe-places:write and Roblox authorization checks. New cloud experience creation and public audience settings remain Studio/dashboard tasks. A live publication has not been tested with a valid key.

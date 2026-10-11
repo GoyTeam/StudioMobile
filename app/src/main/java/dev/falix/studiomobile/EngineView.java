@@ -6,7 +6,7 @@ import android.view.MotionEvent;
 
 /** Viewport surface: one finger orbits, two fingers pan/zoom, tap picks a part. */
 final class EngineView extends GLSurfaceView {
-    interface Listener { void onPick(Instance hit); void onCameraMoved(); }
+    interface Listener { void onPick(Instance hit); void onCameraMoved(); void onRendererError(String message); }
 
     final EngineScene scene;
     private final EngineRenderer renderer;
@@ -19,13 +19,20 @@ final class EngineView extends GLSurfaceView {
         super(context);
         this.scene = scene;
         setEGLContextClientVersion(2);
-        renderer = new EngineRenderer(scene);
+        renderer = new EngineRenderer(scene, (stage, error) -> {
+            // A GL-thread failure must never kill the process: surface it in the editor instead.
+            final String detail = stage + " — " + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage());
+            post(() -> { if (listener != null) listener.onRendererError(detail); });
+        });
         setRenderer(renderer);
         setRenderMode(RENDERMODE_CONTINUOUSLY);
         setZOrderOnTop(false);
     }
 
     void setListener(Listener listener) { this.listener = listener; }
+
+    /** Reason the post-processing pass is unavailable, or an empty string when it works. */
+    String postNote() { return renderer.postNote(); }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
         float x = event.getX(), y = event.getY();

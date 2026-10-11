@@ -11,7 +11,7 @@ rm -rf "$BUILD/classes"/* "$BUILD/generated"/* "$BUILD/dex"/*
 (cd app/libs; sha256sum -c SHA256SUMS >/dev/null)
 "$TOOLS/aapt2" compile --dir app/src/main/res -o "$BUILD/resources.zip"
 sed 's/<manifest /<manifest package="dev.falix.studiomobile" /' app/src/main/AndroidManifest.xml > "$BUILD/AndroidManifest.xml"
-"$TOOLS/aapt2" link -I "$ANDROID" -A app/src/main/assets --manifest "$BUILD/AndroidManifest.xml" --java "$BUILD/generated" --min-sdk-version 26 --target-sdk-version 35 --version-code 4 --version-name 0.4.0 -o "$BUILD/resources.apk" "$BUILD/resources.zip"
+"$TOOLS/aapt2" link -I "$ANDROID" -A app/src/main/assets --manifest "$BUILD/AndroidManifest.xml" --java "$BUILD/generated" --min-sdk-version 26 --target-sdk-version 35 --version-code 5 --version-name 0.5.0 -o "$BUILD/resources.apk" "$BUILD/resources.zip"
 find app/src/main/java "$BUILD/generated" -name '*.java' > "$BUILD/sources.txt"
 javac --release 8 -encoding UTF-8 -cp "$ANDROID:app/libs/*" -d "$BUILD/classes" @"$BUILD/sources.txt"
 jar cf "$BUILD/classes.jar" -C "$BUILD/classes" .
@@ -26,6 +26,6 @@ if [ ! -f "$KEYSTORE" ]; then
   echo "Missing shared debug keystore: $KEYSTORE (run keytool -genkeypair as documented in CONTRIBUTING.md)" >&2
   exit 1
 fi
-"$TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias goyteam-debug --ks-pass pass:android --key-pass pass:android --out "$BUILD/StudioMobile-GoyTeam-0.4.0-debug.apk" "$BUILD/aligned.apk"
-"$TOOLS/apksigner" verify --verbose "$BUILD/StudioMobile-GoyTeam-0.4.0-debug.apk"
-echo 'Debug-signed sideload APK: build/StudioMobile-GoyTeam-0.4.0-debug.apk'
+"$TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias goyteam-debug --ks-pass pass:android --key-pass pass:android --out "$BUILD/StudioMobile-GoyTeam-0.5.0-debug.apk" "$BUILD/aligned.apk"
+"$TOOLS/apksigner" verify --verbose "$BUILD/StudioMobile-GoyTeam-0.5.0-debug.apk"
+echo 'Debug-signed sideload APK: build/StudioMobile-GoyTeam-0.5.0-debug.apk'

@@ -1,4 +1,4 @@
-# Engine internals (0.4.0 beta)
+# Engine internals (0.5.0 beta)
 
 The engine is the layer that turns a real Roblox place file into an editable, playable scene on the
 phone. It is written in plain Java with the Android framework only (OpenGL ES 2.0 via
@@ -11,7 +11,9 @@ phone. It is written in plain Java with the Android framework only (OpenGL ES 2.
         │                              │
         │                              ├─ EngineScene  (selection, undo, camera, physics)
         │                              │        │
-        │                              │        ├─ EngineRenderer (GLES2 viewport)
+        │                              │        ├─ EngineRenderer (GLES2 viewport + post pass)
+        │                              │        ├─ EngineLighting (Lighting/Sky/Atmosphere/post effects)
+        │                              │        ├─ EngineMaterial (Enum.Material shading table)
         │                              │        └─ EngineView     (touch: orbit/pan/zoom/pick)
         │                              │
    PlaceWriter ◄──────────── save ─────┘
@@ -102,13 +104,74 @@ Referents are generated (`RBX…`) when missing so remote/tooling diffing stays 
 edits under `synchronized`, renderer copies a frame list under the same lock — the GL thread never
 walks the live tree.
 
+## Lighting and graphics — `EngineLighting.java` / `EngineMaterial.java`
+
+The viewport implements the Roblox lighting model, not a fixed two-light rig. `EngineLighting.from(root)`
+reads the `Lighting` service (plus `Sky`, `Atmosphere`, `Clouds`, the post effects, and every
+`PointLight`/`SpotLight`/`SurfaceLight`) straight out of the decoded place, so a place's authored
+environment renders in the editor. `EngineScene.refreshCache()` rebuilds it whenever the tree changes.
+
+Property coverage (Roblox name → engine behaviour):
+
+| Property | Behaviour |
+| --- | --- |
+| `ClockTime`, `TimeOfDay` | Sun hour; `TimeOfDay` is parsed as `HH:MM[:SS]` when `ClockTime` is absent |
+| `GeographicLatitude` | Tilts the sun's arc and lowers the noon elevation |
+| `Brightness` | Scales the directional term (`sunGain = clamp(Brightness,0,4) × 0.5 × sunUp`) |
+| `Ambient`, `OutdoorAmbient` | Ambient term everywhere + outdoors |
+| `ColorShift_Top`, `ColorShift_Bottom` | Hue added to sun-facing / sun-away faces and to the sky |
+| `EnvironmentDiffuseScale` | Mixes the sky gradient into the ambient term |
+| `EnvironmentSpecularScale` | Scales specular highlights |
+| `FogColor`, `FogStart`, `FogEnd` | Linear distance fog (default `FogEnd = 100000` disables it) |
+| `ExposureCompensation` | `2^exposure` in the post pass |
+| `GlobalShadows`, `ShadowSoftness`, `Technology`, `LightingStyle` | Read and reported (no shadow map yet) |
+| `Sky` | Sun disc (`SunAngularSize`), stars (`StarCount`), `CelestialBodiesShown`, day/night gradient |
+| `Atmosphere` | `Density`/`Offset`/`Haze`/`Glare`/`Decay`/`Color` haze, horizon band and distance tinting |
+| `Clouds` (under `Terrain`) | `Cover`/`Density`/`Color` procedural drifting cover |
+| `PointLight`/`SpotLight`/`SurfaceLight` | `Color`, `Brightness`, `Range` (capped at 120), `Face`/`Angle` cones, `Enabled`; four shaded per frame |
+| `ColorCorrectionEffect` | `Brightness`, `Contrast`, `Saturation`, `TintColor`, `Enabled` |
+| `BloomEffect` | `Intensity`, `Size`, `Threshold` |
+| `BlurEffect` | `Size` (separable gaussian, up to 56) |
+| `SunRaysEffect` | `Intensity`, `Spread` (radial blur from the sun's screen position) |
+| `DepthOfFieldEffect`, `ColorGradingEffect` | Parsed and reported; DOF is not rendered yet |
+| `Reflectance`, `Material` | Metalness/roughness/emissive/reflectance from `EngineMaterial` |
+
+Sun direction (`sunDirection(clockTime, latitude)`) matches the behaviour Roblox documents: the hour
+angle is `(ClockTime − 6) × 15°`, so the sun is on the eastern horizon at 06:00, highest at 12:00 and
+on the western horizon at 18:00, below the horizon from 18:00 to 06:00, with the arc leaning toward
+`+Z` (south) and its noon height reduced as the latitude grows. Roblox does not publish its exact
+ephemeris, so this is the documented approximation; the tests pin the rise/noon/set behaviour.
+
+Four approximations are deliberate and stated in the app (the **Engine limits** dialog) and the README:
+no shadow maps (`GlobalShadows` only dims faces away from the sun), no environment probe for
+`EnvironmentDiffuseScale` (so `OutdoorAmbient` also follows the sun's height), procedural sky and
+clouds instead of Roblox skybox/cloud textures (they are Roblox asset ids this build cannot fetch),
+and no `DepthOfFieldEffect`.
+
 ## Renderer — `EngineRenderer.java`
 
-- One unit-cube mesh (24 vertices, per-face normals) + one line program; ~30 lines of shader.
-- Per part: model matrix from CFrame × size, color from `Color3uint8`, transparency to alpha,
-  selection gets a bright outline drawn as 12 lines.
-- Grid at 4-stud spacing over ±256 studs; sky is the clear color (no fog yet).
-- Character drawn from six boxes (torso/head/arms/legs) rotated by movement yaw.
+One frame, in order:
+
+1. **Sky** — a full-screen quad whose fragment shader rebuilds the view ray from the inverse
+   view-projection matrix, then draws the day/night gradient, the sun disc, stars, atmosphere
+   haze/glare and drifting cloud noise.
+2. **Geometry** — the unit-cube mesh (24 vertices, per-face normals) shaded by the vertex/fragment
+   pair: hemisphere ambient, directional sun, `ColorShift` hue, up to four local lights with range
+   and cone falloff, Blinn-Phong specular from the material's roughness, emissive materials, and
+   linear fog. Per part: model matrix from CFrame × size, colour from `Color3uint8`, transparency
+   to alpha; the selection gets a bright 12-line outline.
+3. **Post pass** (only while `needsPost()` is true) — the frame renders into an offscreen RGBA
+   texture with a depth renderbuffer, then `BlurEffect`, `BloomEffect` (bright pass + two gaussian
+   passes) and `SunRaysEffect` build half-resolution textures, and a final composite applies bloom,
+   sun rays, exposure and colour correction. If the device cannot build the targets the frame falls
+   back to direct rendering and `EngineView.postNote()` reports why.
+
+A GL-thread failure is caught, logged and shown in the editor (`EngineView.Listener.onRendererError`)
+instead of killing the process; the same applies to place loading and editor construction in
+`EngineActivity`.
+
+Other viewport behaviour: grid at 4-stud spacing over ±256 studs, tinted by the day factor; character
+drawn from six boxes (torso/head/arms/legs) rotated by movement yaw and shaded by the same lighting.
 
 ## Interaction — `EngineView.java` / `JoystickView.java`
 
@@ -131,7 +194,9 @@ where the encrypted API key and the explicit confirmation flow live.
    texture pipeline before adding mesh rendering.
 3. **Binary depth** — ZSTD chunk support, actually decoding (not just skipping) sequences, UDim2
    and Font, resolving `Ref`/`UniqueId`, and physics blobs; add fixtures saved by real Studio.
-4. **Instrumented tests** — snapshot the rendered AABB list for a fixture place and compare
+4. **Graphics depth** — shadow maps for `GlobalShadows`/`ShadowSoftness`, a skybox texture loader
+   for `Sky`, `SurfaceAppearance`/`MaterialVariant` maps, `DepthOfFieldEffect`, and terrain.
+5. **Instrumented tests** — snapshot the rendered AABB list for a fixture place and compare
    against expected geometry, on an emulator, in CI.
 
 ## Testing
@@ -141,6 +206,13 @@ cursor together with the planar / zig-zag / bit-rotation array transforms, the 2
 rotations, an end-to-end decode of a synthetic binary `.rbxl` (header, `INST`/`PROP`/`PRNT`/`END`,
 hierarchy, size and colour), CFrame rotation round-trip, ray/AABB behaviour, character collision
 landing on a floor, XML place decoding of a generated baseplate, decode→write→decode round-tripping,
-and verbatim preservation of unmodeled properties (`Content`, `int64`). Run with
-`./gradlew testDebugUnitTest`.
+verbatim preservation of unmodeled properties (`Content`, `int64`), and the lighting pipeline: the
+sun's rise/noon/set arc and latitude tilt, Roblox defaults with no `Lighting` service, Lighting
+properties reaching the ambient/fog/post-effect model, Sky/Atmosphere/Clouds decoding, neutral
+effects not costing a framebuffer pass, local lights resolving to world space (with the four-light
+cap), the material table, and the generated fixture place carrying `ClockTime 14` into the engine.
+Run with `./gradlew testDebugUnitTest`.
+
+The GLSL ES 1.00 shaders are checked with `glslangValidator` during development; they are plain string
+constants in `EngineRenderer`, so no asset or dependency is needed at runtime.
 Device QA lives in `tests/` (see CONTRIBUTING.md).

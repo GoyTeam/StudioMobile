@@ -32,11 +32,18 @@ public final class EngineActivity extends Activity {
     private TextView title, subtitle, playLabel, explorerCount;
     private EditText explorerSearch;
     private FrameLayout viewportLayer;
+    private TextView rendererError;
     private JoystickView joystick;
     private View jumpButton;
     private View playControls;
     private final HashSet<Instance> expanded = new HashSet<>();
     private final HashSet<Instance> collapsed = new HashSet<>();
+
+    /** Explorer limits: huge places stay responsive and cannot exhaust memory while building rows. */
+    private static final int MAX_TREE_ROWS = 400;
+    private static final int MAX_TREE_DEPTH = 48;
+    private static final int AUTO_EXPAND_LIMIT = 200;
+    private int treeBudget = MAX_TREE_ROWS;
 
     private Uri placeUri;
     private String placeName = "Place";
@@ -52,7 +59,8 @@ public final class EngineActivity extends Activity {
     /** Opens a place in the 3D editor. Managed project places also update their manifest hash on save. */
     static void launch(android.app.Activity from, Uri placeUri, String placeName, Uri projectFolder, String placeId) {
         Intent intent = new Intent(from, EngineActivity.class);
-        intent.putExtra("uri", placeUri.toString());
+        // A missing place file is reported inside the editor, never as a crash while launching it.
+        if (placeUri != null) intent.putExtra("uri", placeUri.toString());
         intent.putExtra("name", placeName == null ? "Place" : placeName);
         if (projectFolder != null) intent.putExtra("folder", projectFolder.toString());
         if (placeId != null) intent.putExtra("placeId", placeId);
@@ -77,8 +85,34 @@ public final class EngineActivity extends Activity {
         getWindow().setStatusBarColor(dark ? 0xff15181e : 0xfff1f3f7);
         getWindow().setNavigationBarColor(dark ? 0xff15181e : 0xfff1f3f7);
         getWindow().getDecorView().setSystemUiVisibility(dark ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-        setContentView(build());
-        load();
+        try {
+            setContentView(build());
+            load();
+        } catch (Throwable failure) {
+            // Constructing the editor must never take the whole app down: show the cause instead.
+            startupFailure(failure);
+        }
+    }
+
+    /** Failure screen used when the editor cannot be built; shows the cause so it can be reported. */
+    private void startupFailure(Throwable failure) {
+        android.util.Log.e("StudioMobile", "Editor failed to start", failure instanceof Exception ? (Exception) failure : new RuntimeException(failure));
+        StringWriter trace = new StringWriter();
+        failure.printStackTrace(new PrintWriter(trace));
+        loading = false;
+        loadError = "Editor could not start";
+        LinearLayout root = col();
+        root.setBackgroundColor(PANEL);
+        root.setPadding(dp(14), dp(14), dp(14), dp(14));
+        root.addView(text("The 3D editor could not start", 15, true, TEXT));
+        root.addView(text("This build caught the error below instead of crashing. Report it together with the trace.", 11, false, MUTED));
+        TextView detail = text(trace.toString(), 10, false, MUTED);
+        detail.setTextIsSelectable(true);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(detail, new ScrollView.LayoutParams(-1, -2));
+        root.addView(scroll, lp(-1, 0, 1));
+        root.addView(button("Close", this::finish), margin(0, dp(8), -2, dp(36)));
+        setContentView(root);
     }
 
     @Override protected void onResume() { super.onResume(); if (viewport != null) viewport.onResume(); }
@@ -202,6 +236,7 @@ public final class EngineActivity extends Activity {
         viewport.setListener(new EngineView.Listener() {
             public void onPick(Instance hit) { scene.selection = hit; if (hit != null) { scene.focus(hit); expanded.add(hit); for (Instance p = hit.parent; p != null; p = p.parent) expanded.add(p); } refresh(); }
             public void onCameraMoved() { }
+            public void onRendererError(String message) { rendererFailed(message); }
         });
         viewportLayer.addView(viewport, new FrameLayout.LayoutParams(-1, -1));
 
@@ -231,7 +266,22 @@ public final class EngineActivity extends Activity {
         playControls = buildPlayControls();
         playControls.setVisibility(View.GONE);
         viewportLayer.addView(playControls, new FrameLayout.LayoutParams(-1, -1));
+
+        rendererError = text("", 10.5f, false, 0xffffffff);
+        rendererError.setBackground(shape(0xcc7a2118, 8));
+        rendererError.setPadding(dp(10), dp(8), dp(10), dp(8));
+        rendererError.setVisibility(View.GONE);
+        FrameLayout.LayoutParams errorParams = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
+        errorParams.setMargins(0, dp(8), dp(8), 0);
+        viewportLayer.addView(rendererError, errorParams);
         return viewportLayer;
+    }
+
+    /** Shows why rendering stopped instead of letting a GL-thread failure kill the process. */
+    private void rendererFailed(String message) {
+        if (rendererError == null) return;
+        rendererError.setText("Rendering stopped\n" + message + "\nEditing still works; reopen the place to retry.");
+        rendererError.setVisibility(View.VISIBLE);
     }
 
     private View buildPlayControls() {
@@ -293,25 +343,30 @@ public final class EngineActivity extends Activity {
                 PlaceDecoder.Result result = PlaceDecoder.decode(tmp);
                 runOnUiThread(() -> {
                     if (isFinishing()) return;
-                    scene.setRoot(result.root, placeName);
-                    scene.warnings.addAll(result.warnings);
-                    for (String warning : result.warnings) scene.unmodeledWarnings.add(warning);
-                    loading = false;
-                    int count = 0;
-                    int parts = 0;
-                    for (Instance i : scene.root.all(null)) { count++; if (i.isRenderable()) parts++; }
-                    subtitle.setText(result.format + "  ·  " + count + " instances  ·  " + parts + " parts");
-                    expanded.addAll(scene.root.children);
-                    if (scene.workspace != null) expanded.add(scene.workspace);
-                    Instance first = scene.root.findFirst("SpawnLocation");
-                    if (first != null) { scene.selection = first; scene.focus(first); }
-                    refresh();
-                    savedVersion = scene.version;
-                    if (autoPlay) startPlay();
+                    try {
+                        scene.setRoot(result.root, placeName);
+                        scene.warnings.addAll(result.warnings);
+                        for (String warning : result.warnings) scene.unmodeledWarnings.add(warning);
+                        loading = false;
+                        int count = 0;
+                        int parts = 0;
+                        for (Instance i : scene.root.all(null)) { count++; if (i.isRenderable()) parts++; }
+                        subtitle.setText(result.format + "  ·  " + count + " instances  ·  " + parts + " parts");
+                        // Only auto-expand containers small enough to stay smooth in the tree.
+                        for (Instance child : scene.root.children) if (child.children.size() <= AUTO_EXPAND_LIMIT) expanded.add(child);
+                        if (scene.workspace != null && scene.workspace.children.size() <= AUTO_EXPAND_LIMIT) expanded.add(scene.workspace);
+                        Instance first = scene.root.findFirst("SpawnLocation");
+                        if (first != null) { scene.selection = first; scene.focus(first); }
+                        refresh();
+                        savedVersion = scene.version;
+                        if (autoPlay) startPlay();
+                    } catch (Throwable failure) {
+                        fail(RobloxApi.safe(failure));
+                    }
                 });
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 final String message = RobloxApi.safe(e);
-                runOnUiThread(() -> fail(message));
+                runOnUiThread(() -> { try { fail(message); } catch (Throwable ignored) { } });
             } finally { if (tmp != null) tmp.delete(); }
         });
     }
@@ -338,23 +393,33 @@ public final class EngineActivity extends Activity {
         explorerList.removeAllViews();
         if (loading || loadError != null) { explorerList.addView(hintText(loadError != null ? "No tree available." : "Reading instances…")); return; }
         String query = explorerSearch == null ? "" : explorerSearch.getText().toString().trim().toLowerCase(Locale.US);
+        treeBudget = MAX_TREE_ROWS;
         addNodes(explorerList, scene.root, 0, query);
         int total = 0;
         for (Instance ignored : scene.root.all(null)) total++;
+        if (treeBudget <= 0) explorerList.addView(hintText("Showing the first " + MAX_TREE_ROWS + " of " + total + " instances. Filter or collapse branches to see the rest."));
         explorerCount.setText(String.valueOf(total));
     }
 
     private boolean matches(Instance node, String query) {
         if (query.isEmpty()) return true;
+        return matches(node, query, 0);
+    }
+
+    private boolean matches(Instance node, String query, int depth) {
+        if (depth >= Instance.MAX_DEPTH) return false;
         if (node.name.toLowerCase(Locale.US).contains(query) || node.className.toLowerCase(Locale.US).contains(query)) return true;
-        for (Instance child : node.children) if (matches(child, query)) return true;
+        for (Instance child : node.children) if (matches(child, query, depth + 1)) return true;
         return false;
     }
 
     private void addNodes(LinearLayout parent, Instance node, int depth, String query) {
+        if (depth > MAX_TREE_DEPTH) return;
         for (Instance child : node.children) {
+            if (treeBudget <= 0) return;
             if (!matches(child, query)) continue;
             parent.addView(treeRow(child, depth, query));
+            treeBudget--;
             boolean open = expanded.contains(child) && !collapsed.contains(child);
             if (query.length() > 0) open = true;
             if (open && !child.children.isEmpty()) addNodes(parent, child, depth + 1, query);
@@ -657,29 +722,14 @@ public final class EngineActivity extends Activity {
         return view;
     }
 
+    /** Every Enum.Material this build knows, with the real numeric ids so saves stay valid. */
     private void materialDialog(Instance node) {
-        final String[] names = {"Plastic", "SmoothPlastic", "Neon", "Wood", "WoodPlanks", "Metal", "DiamondPlate", "Concrete", "Brick", "Glass", "Fabric", "Ice", "Marble", "Granite", "Grass", "Sand", "Slate", "Cobblestone"};
-        final int[] values = {256, 288, 272, 784, 800, 1088, 1072, 816, 848, 864, 1312, 1360, 832, 880, 1280, 1296, 800, 880};
         new AlertDialog.Builder(this).setTitle("Material")
-                .setItems(names, (d, which) -> { scene.setProperty(node, "Material", values[which]); afterEdit(); })
+                .setItems(EngineMaterial.pickerNames(), (d, which) -> { scene.setProperty(node, "Material", EngineMaterial.PICKER_IDS[which]); afterEdit(); })
                 .show();
     }
 
-    private String materialName(int value) {
-        switch (value) {
-            case 288: return "SmoothPlastic";
-            case 272: return "Neon";
-            case 784: return "Wood";
-            case 800: return "WoodPlanks";
-            case 1088: return "Metal";
-            case 816: return "Concrete";
-            case 848: return "Brick";
-            case 864: return "Glass";
-            case 1312: return "Fabric";
-            case 1280: return "Grass";
-            default: return "Plastic";
-        }
-    }
+    private String materialName(int value) { return EngineMaterial.nameOf(value); }
 
     private void colorDialog(int current, CommitColor commit) {
         final int[] palette = {
@@ -856,9 +906,16 @@ public final class EngineActivity extends Activity {
     private void limitsDialog() {
         new AlertDialog.Builder(this).setTitle("Engine limits in this build")
                 .setMessage("Solid parts (Part, SpawnLocation, Wedge, Truss, MeshPart) render as boxes with their real size, CFrame and color.\n\n" +
-                        "Scripts do not run yet. Unions/Meshes use bounding boxes. Rotated parts are collided against with axis-aligned boxes. " +
-                        "Terrain, textures, particles and animations are not rendered in this beta.\n\n" +
-                        "Saving writes the Roblox XML data model back to this place file; publish from the project page to sync with Roblox.")
+                        "Lighting is read from the place: ClockTime/GeographicLatitude drive the sun, and Ambient, OutdoorAmbient, " +
+                        "ColorShift_Top/Bottom, Brightness, FogStart/FogEnd/FogColor, EnvironmentDiffuseScale and " +
+                        "EnvironmentSpecularScale all shade the scene. PointLight, SpotLight and SurfaceLight objects light parts " +
+                        "near them (4 at a time), and Material drives metalness/roughness.\n\n" +
+                        "Sky, Atmosphere and Clouds are drawn procedurally: skybox textures are Roblox assets this build cannot fetch. " +
+                        "ColorCorrection, Bloom, Blur, SunRays and ExposureCompensation are applied as a post pass. Shadows " +
+                        "(GlobalShadows/ShadowSoftness), DepthOfField, terrain, textures, particles and animations are not rendered yet.\n\n" +
+                        "Scripts do not run. Unions/Meshes use bounding boxes, and rotated parts collide as axis-aligned boxes.\n\n" +
+                        "Saving writes the Roblox XML data model back to this place file; publish from the project page to sync with Roblox."
+                        + (viewport == null || viewport.postNote().isEmpty() ? "" : "\n\n" + viewport.postNote()))
                 .setPositiveButton("Got it", null).show();
     }
 

@@ -185,13 +185,15 @@ public final class RobloxApi {
     public static boolean xmlPlace(File file) throws IOException {
         byte[] b=new byte[32];int n;try(InputStream in=new FileInputStream(file)){n=in.read(b);}return n>0&&new String(b,0,n,"UTF-8").trim().startsWith("<?xml")||n>0&&new String(b,0,n,"UTF-8").trim().startsWith("<roblox ");
     }
-    public static String safe(Exception e) {
+    public static String safe(Throwable e) {
         if(e instanceof ApiException)return e.getMessage();
         if(e instanceof java.net.SocketTimeoutException)return "Connection timed out. Try again.";
         if(e instanceof java.net.UnknownHostException)return "Unable to reach Roblox. Check your connection.";
         if(e instanceof javax.net.ssl.SSLException)return "The secure connection to Roblox failed.";
         if(e instanceof JSONException)return "Roblox returned an unexpected response.";
         if(e instanceof IOException)return e.getMessage()==null?"File or network operation failed.":e.getMessage();
-        return "The operation could not be completed.";
+        // Unexpected failures keep their type and message so they can be diagnosed and reported.
+        String message=e.getMessage();
+        return e.getClass().getSimpleName()+(message==null||message.isEmpty()?"" : ": "+message);
     }
 }
