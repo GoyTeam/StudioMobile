@@ -12,18 +12,18 @@ import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
 /**
- * OpenGL ES 2.0 viewport with a Roblox-shaped lighting pipeline. No third-party engine.
+ * OpenGL ES 2.0 viewport with the Roblox graphics pipeline. No third-party engine.
  *
  * One frame, in order:
- *  1. procedural sky (gradient, sun disc, stars, atmosphere haze/glare, drifting clouds),
- *  2. grid, then every renderable part shaded with the Lighting service: sun direction and
- *     colour from ClockTime/GeographicLatitude/Brightness, ambient from Ambient +
- *     OutdoorAmbient (+ EnvironmentDiffuseScale of the sky), ColorShift_Top/Bottom on
- *     sun-facing/away faces, per-material roughness/metalness/emissive, EnvironmentSpecularScale,
- *     up to four PointLight/SpotLight/SurfaceLight objects, and linear FogStart/FogEnd fog,
- *  3. optional post pass (BlurEffect, BloomEffect, SunRaysEffect, ColorCorrectionEffect and
- *     ExposureCompensation) through framebuffer textures; if the device cannot build them the
- *     frame falls back to direct rendering.
+ *  1. sky: a streamed `Sky` cubemap when all six faces loaded, otherwise a procedural gradient with
+ *     the sun disc, stars, atmosphere haze/glare and drifting clouds;
+ *  2. parts, shaded by the Lighting service (see {@link EngineLighting}) with a texture pass:
+ *     every face samples either its `SurfaceType` texture (Studs, Inlet, Universal, Hinge, Motor,
+ *     SteppingMotor, Weld, Glue) or its `Enum.Material` texture, world-aligned at Roblox-like tile
+ *     sizes, and any `Texture`/`Decal`/`SurfaceAppearance.ColorMap`/`MeshPart.TextureID` asset is
+ *     streamed and layered on top;
+ *  3. the transform gizmo (move arrows, rotate rings, scale handles) and the selection outline;
+ *  4. an optional framebuffer post pass (Blur, Bloom, SunRays, ColorCorrection, Exposure).
  *
  * A GL-thread failure is reported to the activity instead of killing the process.
  */
@@ -33,19 +33,28 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private static final int MAX_LIGHTS = EngineLighting.MAX_SHADED_LIGHTS;
 
     private final EngineScene scene;
+    private final EngineTextures textures;
     private final ErrorReport report;
     private final ArrayList<Instance> frameList = new ArrayList<>();
     private boolean stopped;
 
     // ---------------------------------------------------------------- shaders
     private static final String VERT =
-            "uniform mat4 uMvp; uniform mat4 uModel; uniform mat3 uNormal; attribute vec3 aPos; attribute vec3 aNormal;\n" +
-            "varying vec3 vNormal; varying vec3 vWorld;\n" +
-            "void main(){ vNormal=uNormal*aNormal; vWorld=(uModel*vec4(aPos,1.0)).xyz; gl_Position=uMvp*vec4(aPos,1.0); }";
+            "uniform mat4 uMvp; uniform mat4 uModel; uniform mat3 uNormal; attribute vec3 aPos; attribute vec3 aLocal; attribute float aFace;\n" +
+            "varying vec3 vNormal; varying vec3 vWorld; varying vec3 vLocal; varying float vFace;\n" +
+            // The mesh is the unit cube, so the face normal is the dominant axis of the local position.
+            "vec3 localNormal(vec3 p){\n" +
+            "  vec3 a = abs(p);\n" +
+            "  if (a.x >= a.y && a.x >= a.z) return vec3(p.x < 0.0 ? -1.0 : 1.0, 0.0, 0.0);\n" +
+            "  if (a.y >= a.z) return vec3(0.0, p.y < 0.0 ? -1.0 : 1.0, 0.0);\n" +
+            "  return vec3(0.0, 0.0, p.z < 0.0 ? -1.0 : 1.0);\n" +
+            "}\n" +
+            "void main(){ vNormal=uNormal*localNormal(aLocal); vWorld=(uModel*vec4(aPos,1.0)).xyz; vLocal=aLocal; vFace=aFace;\n" +
+            "  gl_Position=uMvp*vec4(aPos,1.0); }";
 
     private static final String FRAG =
             "precision mediump float;\n" +
-            "varying vec3 vNormal; varying vec3 vWorld;\n" +
+            "varying vec3 vNormal; varying vec3 vWorld; varying vec3 vLocal; varying float vFace;\n" +
             "uniform vec3 uColor; uniform float uAlpha;\n" +
             "uniform vec3 uAmbient; uniform vec3 uSunDir; uniform vec3 uSunColor; uniform float uSunGain;\n" +
             "uniform vec3 uShiftTop; uniform vec3 uShiftBottom; uniform vec3 uEye;\n" +
@@ -54,8 +63,33 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "uniform vec3 uFogColor; uniform vec2 uFogRange; uniform float uFogEnabled;\n" +
             "uniform vec3 uLightPos[4]; uniform vec3 uLightColor[4]; uniform vec3 uLightDir[4]; uniform vec4 uLightParams[4];\n" +
             "uniform int uLightCount;\n" +
+            "uniform sampler2D uAtlas; uniform float uAtlasStep; uniform vec4 uFaceTiles[6];\n" +
+            "uniform vec4 uSpawnTile; uniform float uIsSpawn;\n" +
+            "uniform sampler2D uAsset; uniform float uHasAsset; uniform vec2 uAssetTiles; uniform float uAssetFace;\n" +
             "void main(){\n" +
             "  vec3 n = normalize(vNormal);\n" +
+            "  vec2 faceUv;\n" +
+            "  if (abs(n.y) >= abs(n.x) && abs(n.y) >= abs(n.z)) faceUv = vLocal.xz;\n" +
+            "  else if (abs(n.x) >= abs(n.z)) faceUv = vLocal.zy;\n" +
+            "  else faceUv = vLocal.xy;\n" +
+            "  faceUv += 0.5;\n" +
+            "  int face = int(vFace + 0.5);\n" +
+            "  vec4 tile = uFaceTiles[0];\n" +
+            "  if (face == 1) tile = uFaceTiles[1];\n" +
+            "  else if (face == 2) tile = uFaceTiles[2];\n" +
+            "  else if (face == 3) tile = uFaceTiles[3];\n" +
+            "  else if (face == 4) tile = uFaceTiles[4];\n" +
+            "  else if (face == 5) tile = uFaceTiles[5];\n" +
+            "  bool spawnFace = uIsSpawn > 0.5 && face == 2;\n" +
+            "  if (spawnFace) tile = uSpawnTile;\n" +
+            "  vec2 planar = abs(n.y) >= abs(n.x) && abs(n.y) >= abs(n.z) ? vWorld.xz : (abs(n.x) >= abs(n.z) ? vWorld.zy : vWorld.xy);\n" +
+            "  const float EDGE = 0.0039;\n" +
+            "  vec2 cell = spawnFace ? faceUv : fract(planar * tile.z);\n" +
+            "  vec2 atlasUv = tile.xy * uAtlasStep + (cell * (1.0 - 2.0 * EDGE) + EDGE) * uAtlasStep;\n" +
+            "  vec3 base = uColor;\n" +
+            "  if (tile.w > 0.5) base *= texture2D(uAtlas, atlasUv).rgb;\n" +
+            "  float assetMask = (uAssetFace < -0.5 || abs(uAssetFace - vFace) < 0.5) ? uHasAsset : 0.0;\n" +
+            "  if (assetMask > 0.0) base = mix(base, texture2D(uAsset, faceUv * uAssetTiles).rgb, assetMask);\n" +
             "  vec3 ambient = mix(uAmbient * 0.55, uAmbient, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));\n" +
             "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
             "  vec3 light = ambient + uSunColor * ndl * uSunGain;\n" +
@@ -72,14 +106,19 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "      float cd = dot(-l, normalize(uLightDir[i]));\n" +
             "      cone = smoothstep(uLightParams[i].y, uLightParams[i].y + (1.0 - uLightParams[i].y) * 0.35, cd);\n" +
             "    }\n" +
-            "    light += uLightColor[i] * max(dot(n, l), 0.0) * atten * cone * used;\n" +
+            "    float ndlLocal = max(dot(n, l), 0.0);\n" +
+            "    light += uLightColor[i] * ndlLocal * atten * cone * used;\n" +
+            "    if (uMetal > 0.5) {\n" +
+            "      vec3 hv = normalize(normalize(uEye - vWorld) + l);\n" +
+            "      light += uLightColor[i] * pow(max(dot(n, hv), 0.0), uShininess) * atten * cone * used * 0.5;\n" +
+            "    }\n" +
             "  }\n" +
             "  vec3 view = normalize(uEye - vWorld);\n" +
             "  vec3 hv = normalize(view + uSunDir);\n" +
             "  float spec = pow(max(dot(n, hv), 0.0), uShininess) * (1.0 - uRough * 0.5);\n" +
-            "  vec3 specColour = mix(vec3(0.04), uColor, uMetal);\n" +
-            "  vec3 col = uColor * light * (1.0 - uMetal * 0.6) + specColour * spec * uSpecular * (uSunGain * 1.1 + 0.2)\n" +
-            "           + uColor * uEmissive * 1.35;\n" +
+            "  vec3 specColour = mix(vec3(0.04), base, uMetal);\n" +
+            "  vec3 col = base * light * (1.0 - uMetal * 0.6) + specColour * spec * uSpecular * (uSunGain * 1.1 + 0.2)\n" +
+            "           + base * uEmissive * 1.35;\n" +
             "  float viewDist = length(uEye - vWorld);\n" +
             "  float fog = uFogEnabled * clamp((viewDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.001), 0.0, 1.0);\n" +
             "  gl_FragColor = vec4(mix(col, uFogColor, fog), uAlpha);\n" +
@@ -98,6 +137,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "uniform float uSunAngular, uStarCount, uCelestial, uDayFactor;\n" +
             "uniform float uAtmoDensity, uAtmoHaze, uAtmoGlare, uAtmoOffset, uAtmoDecay;\n" +
             "uniform float uCloudCover, uCloudDensity, uCloudTime;\n" +
+            "uniform samplerCube uSkyCube; uniform float uUseSkyCube;\n" +
             "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }\n" +
             "float noise(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n" +
             "  return mix(mix(hash(i), hash(i+vec2(1.0,0.0)), u.x), mix(hash(i+vec2(0.0,1.0)), hash(i+vec2(1.0,1.0)), u.x), u.y); }\n" +
@@ -107,6 +147,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  float h = dir.y;\n" +
             "  vec3 col = h >= 0.0 ? mix(uSkyHorizon, uSkyTop, pow(clamp(h, 0.0, 1.0), 0.55))\n" +
             "                      : mix(uSkyHorizon, uSkyGround, clamp(-h * 3.5, 0.0, 1.0));\n" +
+            "  if (uUseSkyCube > 0.5) col = textureCube(uSkyCube, dir).rgb;\n" +
             "  float cs = max(dot(dir, uSunDir), 0.0);\n" +
             "  float disc = uSunAngular > 0.01 ? smoothstep(cos(radians(uSunAngular)), cos(radians(uSunAngular * 0.72)), cs) : 0.0;\n" +
             "  col += uSunColor * (disc * 1.6 + pow(cs, 90.0) * 0.5);\n" +
@@ -120,7 +161,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "    float mask = smoothstep(1.0 - uCloudCover, 1.0 - uCloudCover + 0.22, fbm(uv * 1.4)) * smoothstep(0.0, 0.16, h);\n" +
             "    col = mix(col, uCloudColor * (0.72 + 0.28 * fbm(uv * 1.9)), mask * uCloudDensity);\n" +
             "  }\n" +
-            "  if (uCelestial > 0.5 && h > 0.01 && uStarCount > 0.0) {\n" +
+            "  if (uUseSkyCube < 0.5 && uCelestial > 0.5 && h > 0.01 && uStarCount > 0.0) {\n" +
             "    float s = hash(floor(dir.xz / max(h, 0.08) * 60.0));\n" +
             "    col += vec3(step(1.0 - uStarCount / 400000.0, s) * (1.0 - uDayFactor) * smoothstep(0.0, 0.2, h) * 0.9);\n" +
             "  }\n" +
@@ -164,41 +205,47 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
     // ---------------------------------------------------------------- programs
     private int program, lineProgram, skyProgram, brightProgram, blurProgram, raysProgram, postProgram;
-    private int aPos, aNormal, uMvp, uModel, uNormal, uColor, uAlpha;
+    private int aPos, aLocal, aFace, uMvp, uModel, uNormal, uColor, uAlpha;
     private int uAmbient, uSunDir, uSunColor, uSunGain, uShiftTop, uShiftBottom, uEye, uRough, uMetal, uEmissive, uShininess, uSpecular;
     private int uFogColor, uFogRange, uFogEnabled, uLightPos, uLightColor, uLightDir, uLightParams, uLightCount;
+    private int uAtlas, uAtlasStep, uFaceTiles, uSpawnTile, uIsSpawn, uAsset, uHasAsset, uAssetTiles, uAssetFace;
     private int lPos, lMvp, lColor, lAlpha;
-    // Each full-screen program declares its own vec2 attribute, so store one location per program.
     private int qPos, brightPos, blurPos, raysPos, postPos;
-    private int sRayTL, sRayTR, sRayBL, sRayBR, sSunDir, sSunColor, sSkyTop, sSkyHorizon, sSkyGround, sAtmosphere, sCloudColor;
+    private int sRayTL, sRayTR, sRayBL, sRayBR, sSunDir, sSunColor, sSkyTop, sSkyHorizon, sSkyGround, sAtmosphere, sCloudColor, sSkyCube, sUseSkyCube;
     private int sSunAngular, sStarCount, sCelestial, sDayFactor, sAtmoDensity, sAtmoHaze, sAtmoGlare, sAtmoOffset, sAtmoDecay, sCloudCover, sCloudDensity, sCloudTime;
     private int bScene, bThreshold, ublSrc, ublStep, rScene, rSunUv, rSpread, rIntensity, pScene, pBloom, pRays, pBloomAmount, pRaysAmount, pExposure, pCcBrightness, pCcContrast, pCcSaturation, pTint;
 
     // ---------------------------------------------------------------- geometry
-    private FloatBuffer cubePositions, cubeNormals, gridLines, quadBuffer, outlineBuffer;
+    private FloatBuffer cubePositions, cubeNormals, faceBuffer, gridLines, quadBuffer, gizmoBuffer;
     private ShortBuffer cubeIndices;
     private int gridVertices;
-    private float[] outlinePoints = new float[24 * 3];
+    /** 3 rotate rings x 48 segments x 2 vertices; the move axes only need 6. */
+    private static final int GIZMO_LINE_VERTICES = 3 * 48 * 2;
+    private final float[] gizmoScratch = new float[GIZMO_LINE_VERTICES * 3];
 
     private final float[] mProj = new float[16], mView = new float[16], mVp = new float[16], mModel = new float[16], mMvp = new float[16], mInvVp = new float[16];
     private final float[] normal3 = new float[9];
     private final float[] lightPos = new float[MAX_LIGHTS * 3], lightColor = new float[MAX_LIGHTS * 3];
     private final float[] lightDir = new float[MAX_LIGHTS * 3], lightParams = new float[MAX_LIGHTS * 4];
+    private final float[] faceTiles = new float[6 * 4];
     private final float[] sunUv = new float[2];
     private long lastFrame;
     private int viewportWidth = 1, viewportHeight = 1;
     private volatile String postNote = "";
-
-    // offscreen targets for the post pass; null/0 when unavailable
-    private int sceneFbo, sceneTex, sceneDepth, scratchFbo, scratchTex, halfFbo, halfTex, halfFbo2, halfTex2;
-    private int targetWidth, targetHeight;
     private boolean postAvailable;
+    private int targetWidth, targetHeight;
+    private int sceneFbo, sceneTex, sceneDepth, scratchFbo, scratchTex, halfFbo, halfTex, halfFbo2, halfTex2;
+    private boolean skyRequested;
 
     private static final float[] HEAD = {0.96f, 0.80f, 0.19f};
     private static final float[] TORSO = {0.05f, 0.41f, 0.82f};
     private static final float[] LIMB = {0.64f, 0.74f, 0.28f};
 
-    EngineRenderer(EngineScene scene, ErrorReport report) { this.scene = scene; this.report = report; }
+    EngineRenderer(EngineScene scene, EngineTextures textures, ErrorReport report) {
+        this.scene = scene;
+        this.textures = textures;
+        this.report = report;
+    }
 
     private void fail(String stage, Throwable error) {
         if (stopped) return;
@@ -216,9 +263,10 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             GLES20.glCullFace(GLES20.GL_BACK);
             GLES20.glEnable(GLES20.GL_CULL_FACE);
 
-            program = build(VERT, FRAG);
+            program = build(shadeVertexSource(), FRAG);
             aPos = GLES20.glGetAttribLocation(program, "aPos");
-            aNormal = GLES20.glGetAttribLocation(program, "aNormal");
+            aLocal = GLES20.glGetAttribLocation(program, "aLocal");
+            aFace = GLES20.glGetAttribLocation(program, "aFace");
             uMvp = GLES20.glGetUniformLocation(program, "uMvp");
             uModel = GLES20.glGetUniformLocation(program, "uModel");
             uNormal = GLES20.glGetUniformLocation(program, "uNormal");
@@ -244,6 +292,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             uLightDir = GLES20.glGetUniformLocation(program, "uLightDir[0]");
             uLightParams = GLES20.glGetUniformLocation(program, "uLightParams[0]");
             uLightCount = GLES20.glGetUniformLocation(program, "uLightCount");
+            uAtlas = GLES20.glGetUniformLocation(program, "uAtlas");
+            uAtlasStep = GLES20.glGetUniformLocation(program, "uAtlasStep");
+            uFaceTiles = GLES20.glGetUniformLocation(program, "uFaceTiles[0]");
+            uSpawnTile = GLES20.glGetUniformLocation(program, "uSpawnTile");
+            uIsSpawn = GLES20.glGetUniformLocation(program, "uIsSpawn");
+            uAsset = GLES20.glGetUniformLocation(program, "uAsset");
+            uHasAsset = GLES20.glGetUniformLocation(program, "uHasAsset");
+            uAssetTiles = GLES20.glGetUniformLocation(program, "uAssetTiles");
+            uAssetFace = GLES20.glGetUniformLocation(program, "uAssetFace");
 
             lineProgram = build(LINE_VERT, LINE_FRAG);
             lPos = GLES20.glGetAttribLocation(lineProgram, "aPos");
@@ -264,6 +321,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             sSkyGround = GLES20.glGetUniformLocation(skyProgram, "uSkyGround");
             sAtmosphere = GLES20.glGetUniformLocation(skyProgram, "uAtmosphereColor");
             sCloudColor = GLES20.glGetUniformLocation(skyProgram, "uCloudColor");
+            sSkyCube = GLES20.glGetUniformLocation(skyProgram, "uSkyCube");
+            sUseSkyCube = GLES20.glGetUniformLocation(skyProgram, "uUseSkyCube");
             sSunAngular = GLES20.glGetUniformLocation(skyProgram, "uSunAngular");
             sStarCount = GLES20.glGetUniformLocation(skyProgram, "uStarCount");
             sCelestial = GLES20.glGetUniformLocation(skyProgram, "uCelestial");
@@ -307,11 +366,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             buildCube();
             buildGrid();
             buildQuad();
+            textures.buildAtlas();
             releaseTargets();
         } catch (Throwable t) {
             fail("creating the GL pipeline", t);
         }
     }
+
+    /** The part shader needs the face normal of the unit cube, which is its normalised position. */
+    private static String shadeVertexSource() { return VERT; }
 
     private static int build(String vertex, String fragment) {
         int vs = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER);
@@ -326,25 +389,26 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     }
 
     private void buildCube() {
-        float[] p = new float[24 * 3], n = new float[24 * 3];
+        float[] p = new float[24 * 3], f = new float[24];
         float[][] faces = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
         int v = 0;
-        for (float[] f : faces) {
-            float[] u = Math.abs(f[0]) > 0.5f ? new float[]{0, 0, 1} : new float[]{1, 0, 0};
-            float[] w = cross(f, u);
+        for (int faceIndex = 0; faceIndex < 6; faceIndex++) {
+            float[] normal = faces[faceIndex];
+            float[] u = Math.abs(normal[0]) > 0.5f ? new float[]{0, 0, 1} : new float[]{1, 0, 0};
+            float[] w = cross(normal, u);
             for (int i = 0; i < 4; i++) {
                 float su = (i == 0 || i == 3) ? -0.5f : 0.5f;
                 float sw = (i < 2) ? -0.5f : 0.5f;
-                p[v * 3] = f[0] * 0.5f + u[0] * su + w[0] * sw;
-                p[v * 3 + 1] = f[1] * 0.5f + u[1] * su + w[1] * sw;
-                p[v * 3 + 2] = f[2] * 0.5f + u[2] * su + w[2] * sw;
-                n[v * 3] = f[0]; n[v * 3 + 1] = f[1]; n[v * 3 + 2] = f[2];
+                p[v * 3] = normal[0] * 0.5f + u[0] * su + w[0] * sw;
+                p[v * 3 + 1] = normal[1] * 0.5f + u[1] * su + w[1] * sw;
+                p[v * 3 + 2] = normal[2] * 0.5f + u[2] * su + w[2] * sw;
+                f[v] = faceIndex;
                 v++;
             }
         }
         short[] idx = {0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 8, 9, 10, 8, 10, 11, 12, 14, 13, 12, 15, 14, 16, 17, 18, 16, 18, 19, 20, 22, 21, 20, 23, 22};
         cubePositions = floatBuffer(p);
-        cubeNormals = floatBuffer(n);
+        faceBuffer = floatBuffer(f);
         cubeIndices = shortBuffer(idx);
     }
 
@@ -365,9 +429,9 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         gridLines = floatBuffer(java.util.Arrays.copyOf(out, i));
     }
 
-    /** Full-screen triangle strip: the sky and every post pass reuse this quad. */
     private void buildQuad() {
         quadBuffer = floatBuffer(new float[]{-1, -1, 1, -1, -1, 1, 1, 1});
+        gizmoBuffer = ByteBuffer.allocateDirect(gizmoScratch.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
     }
 
     private static FloatBuffer floatBuffer(float[] data) {
@@ -396,6 +460,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             double dt = lastFrame == 0 ? 0 : (now - lastFrame) / 1e9;
             lastFrame = now;
             if (scene.playing) scene.step(dt);
+            scene.flyEditCamera(dt);
 
             EngineLighting light;
             synchronized (scene) {
@@ -406,22 +471,27 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             }
             if (light == null) light = EngineLighting.from(null);
 
+            textures.uploadPending();
+            if (!skyRequested && light.skyTextures != null) {
+                textures.requestSky(light.skyTextures);
+                skyRequested = true;
+            }
+
             scene.updateEye();
             float aspect = (float) viewportWidth / viewportHeight;
             Matrix.perspectiveM(mProj, 0, 60f, aspect, 0.1f, 4000f);
             Matrix.setLookAtM(mView, 0, (float) scene.camEye[0], (float) scene.camEye[1], (float) scene.camEye[2],
                     (float) scene.camTarget[0], (float) scene.camTarget[1], (float) scene.camTarget[2], 0, 1, 0);
             Matrix.multiplyMM(mVp, 0, mProj, 0, mView, 0);
+            synchronized (scene) { System.arraycopy(mVp, 0, scene.viewProjection, 0, 16); }
 
             boolean post = light.needsPost() && ensureTargets(viewportWidth, viewportHeight);
             if (post) {
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, sceneFbo);
-                GLES20.glViewport(0, 0, viewportWidth, viewportHeight);
             } else {
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-                GLES20.glViewport(0, 0, viewportWidth, viewportHeight);
             }
-
+            GLES20.glViewport(0, 0, viewportWidth, viewportHeight);
             GLES20.glClearColor((float) light.skyHorizon[0], (float) light.skyHorizon[1], (float) light.skyHorizon[2], 1f);
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
 
@@ -431,10 +501,12 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             GLES20.glEnable(GLES20.GL_BLEND);
             setGlobalLighting(light);
+            bindAtlas();
             for (Instance part : frameList) drawPart(part, light);
             Instance selected = scene.selection;
             if (selected != null && selected.isRenderable()) drawOutline(selected);
             if (scene.playing) drawCharacter(light);
+            drawGizmo(light);
 
             if (post) composite(light);
         } catch (Throwable t) {
@@ -481,6 +553,12 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1i(uLightCount, count);
     }
 
+    private void bindAtlas() {
+        GLES20.glUniform1i(uAtlas, 0);
+        GLES20.glUniform1f(uAtlasStep, 1f / EngineTextures.ATLAS_TILES);
+        bindTexture(0, textures.atlasTexture());
+    }
+
     // ---------------------------------------------------------------- sky
     private void drawSky(EngineLighting light) {
         if (!Matrix.invertM(mInvVp, 0, mVp, 0)) return;
@@ -501,6 +579,11 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform3f(sSkyGround, (float) light.skyGround[0], (float) light.skyGround[1], (float) light.skyGround[2]);
         GLES20.glUniform3f(sAtmosphere, (float) light.atmosphereColor[0], (float) light.atmosphereColor[1], (float) light.atmosphereColor[2]);
         GLES20.glUniform3f(sCloudColor, (float) light.cloudColor[0], (float) light.cloudColor[1], (float) light.cloudColor[2]);
+        int cube = textures.skyCubeTexture();
+        GLES20.glUniform1i(sSkyCube, 2);
+        if (cube != 0) bindTextureTarget(2, GLES20.GL_TEXTURE_CUBE_MAP, cube);
+        else bindTexture(2, textures.atlasTexture());
+        GLES20.glUniform1f(sUseSkyCube, cube != 0 ? 1f : 0f);
         GLES20.glUniform1f(sSunAngular, (float) (light.celestialBodiesShown ? light.sunAngularSize : 0));
         GLES20.glUniform1f(sStarCount, (float) light.starCount);
         GLES20.glUniform1f(sCelestial, light.celestialBodiesShown ? 1f : 0f);
@@ -539,9 +622,9 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private void drawGrid(EngineLighting light) {
         GLES20.glUseProgram(lineProgram);
         GLES20.glUniformMatrix4fv(lMvp, 1, false, mVp, 0);
-        float tone = (float) (0.12 + 0.34 * light.dayFactor);
+        float tone = (float) (0.14 + 0.30 * light.dayFactor);
         GLES20.glUniform3f(lColor, tone, tone * 1.06f, tone * 1.22f);
-        GLES20.glUniform1f(lAlpha, 0.4f);
+        GLES20.glUniform1f(lAlpha, 0.36f);
         GLES20.glEnableVertexAttribArray(lPos);
         GLES20.glVertexAttribPointer(lPos, 3, GLES20.GL_FLOAT, false, 0, gridLines);
         GLES20.glDrawArrays(GLES20.GL_LINES, 0, gridVertices);
@@ -549,6 +632,83 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     }
 
     // ---------------------------------------------------------------- parts
+    private String assetContent;
+    private int assetFaceIndex = -1;
+    private double assetTilesU = 1, assetTilesV = 1;
+
+    /**
+     * Resolves the asset texture a part shows: `SurfaceAppearance.ColorMap`, `MeshPart.TextureID`,
+     * then the first `Texture`/`Decal` child. Roblox's built-in `rbxasset://` textures are skipped
+     * because they belong to the client, not to the place.
+     */
+    private boolean resolveAsset(Instance part) {
+        assetContent = null;
+        assetFaceIndex = -1;
+        assetTilesU = assetTilesV = 1;
+        Instance appearance = null, decal = null, texture = null;
+        for (Instance child : part.children) {
+            switch (child.className) {
+                case "SurfaceAppearance": if (appearance == null) appearance = child; break;
+                case "Texture": if (texture == null) texture = child; break;
+                case "Decal": if (decal == null) decal = child; break;
+                default: break;
+            }
+        }
+        String content = null;
+        if (appearance != null) content = content(appearance, "ColorMap");
+        if (content == null) content = content(part, "TextureID");
+        if (content == null) content = content(part, "TextureId");
+        if (content == null && texture != null) {
+            content = content(texture, "Texture");
+            if (content != null) {
+                assetFaceIndex = faceOfNormalId(texture.getInt("Face", 5));
+                double[] face = faceExtent(part, assetFaceIndex);
+                double studsU = Math.max(0.05, texture.getNumber("StudsPerTileU", 1));
+                double studsV = Math.max(0.05, texture.getNumber("StudsPerTileV", 1));
+                assetTilesU = Math.max(1, Math.round(face[0] / studsU));
+                assetTilesV = Math.max(1, Math.round(face[1] / studsV));
+            }
+        }
+        if (content == null && decal != null) {
+            content = content(decal, "Texture");
+            if (content != null) assetFaceIndex = faceOfNormalId(decal.getInt("Face", 5));
+        }
+        if (content == null || content.isEmpty()) return false;
+        assetContent = content;
+        return true;
+    }
+
+    /**
+     * Roblox stores a Texture/Decal face as Enum.NormalId: Right 0, Top 1, Back 2, Left 3,
+     * Bottom 4, Front 5. The cube mesh numbers its faces +X, -X, +Y, -Y, +Z, -Z, so the value has
+     * to be remapped or a texture lands on the wrong side of the part.
+     */
+    static int faceOfNormalId(int normalId) {
+        switch (normalId) {
+            case 0: return 0;    // Right  -> +X
+            case 1: return 2;    // Top    -> +Y
+            case 2: return 4;    // Back   -> +Z
+            case 3: return 1;    // Left   -> -X
+            case 4: return 3;    // Bottom -> -Y
+            default: return 5;   // Front  -> -Z
+        }
+    }
+
+    private static String content(Instance owner, String key) {
+        Object value = owner.props.get(key);
+        return value instanceof String ? (String) value : null;
+    }
+
+    /** Studs across a face, ordered the way the shader derives its face UV. */
+    private static double[] faceExtent(Instance part, int face) {
+        double[] s = part.size();
+        switch (face) {
+            case 0: case 3: return new double[]{Math.abs(s[2]), Math.abs(s[1])};
+            case 2: case 4: return new double[]{Math.abs(s[0]), Math.abs(s[1])};
+            default: return new double[]{Math.abs(s[0]), Math.abs(s[2])};
+        }
+    }
+
     private void drawPart(Instance part, EngineLighting light) {
         double[] c = part.cframe();
         double[] s = part.size();
@@ -557,13 +717,48 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         int color = part.getColor();
         float r = ((color >> 16) & 0xFF) / 255f, g = ((color >> 8) & 0xFF) / 255f, b = (color & 0xFF) / 255f;
         float alpha = (float) (1.0 - Math.max(0, Math.min(1, part.getNumber("Transparency", 0))));
-        if (part.className.equals("SpawnLocation")) { r = 0.13f; g = 0.62f; b = 0.29f; alpha = Math.max(alpha, 0.92f); }
+        boolean spawn = part.className.equals("SpawnLocation");
         if (alpha < 0.03f) return;
         boolean hot = part == scene.selection;
         if (hot) { r = Math.min(1, r * 1.25f + 0.05f); g = Math.min(1, g * 1.25f + 0.05f); b = Math.min(1, b * 1.25f + 0.05f); alpha = Math.max(alpha, 0.85f); }
         EngineMaterial material = EngineMaterial.of(part.getInt("Material", 256));
         double reflectance = Math.max(0, Math.min(1, part.getNumber("Reflectance", 0))) + material.reflectance;
-        drawBox(r, g, b, alpha, material, light.specularScale + reflectance);
+        boolean hasAsset = resolveAsset(part);
+        int assetTexture = hasAsset ? textures.assetTexture(assetContent) : 0;
+        int atlas = textures.atlasTexture();
+        boolean sampleAtlas = atlas != 0;
+        // Face order matches the cube geometry: +X, -X, +Y, -Y, +Z, -Z.
+        setFaceTiles(part, spawn, sampleAtlas);
+        if (spawn) {
+            int tile = textures.spawnTile();
+            setTileUniform(uSpawnTile, tile, textures.tileStuds(tile));
+        }
+        drawBox(r, g, b, alpha, material, light.specularScale + reflectance, spawn ? 1f : 0f,
+                assetTexture != 0 ? assetTexture : (sampleAtlas ? atlas : 0),
+                assetTexture != 0 ? 1f : 0f, assetFaceIndex);
+    }
+
+    /** Per-face tile: the surface type wins over the material, exactly like Roblox. */
+    private void setFaceTiles(Instance part, boolean spawn, boolean sampleAtlas) {
+        int materialTile = textures.materialTile(part.getInt("Material", 256));
+        String[] keys = {"RightSurface", "LeftSurface", "TopSurface", "BottomSurface", "BackSurface", "FrontSurface"};
+        for (int face = 0; face < 6; face++) {
+            int surface = part.getInt(keys[face], 0);
+            int tile = surface == 0 ? materialTile : textures.surfaceTile(surface);
+            float studs = textures.tileStuds(tile);
+            faceTiles[face * 4] = (tile % EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES;
+            faceTiles[face * 4 + 1] = (tile / EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES;
+            faceTiles[face * 4 + 2] = 1f / studs;
+            faceTiles[face * 4 + 3] = sampleAtlas ? 1f : 0f;
+        }
+        GLES20.glUniform4fv(uFaceTiles, 6, faceTiles, 0);
+    }
+
+    private void setTileUniform(int location, int tile, float studs) {
+        GLES20.glUniform4f(location,
+                (tile % EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES,
+                (tile / EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES,
+                1f / studs, 1f);
     }
 
     private void setModel(double[] c, float sx, float sy, float sz) {
@@ -575,12 +770,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         mModel[8] = r02 * sz; mModel[9] = r12 * sz; mModel[10] = r22 * sz; mModel[11] = 0;
         mModel[12] = (float) c[0]; mModel[13] = (float) c[1]; mModel[14] = (float) c[2]; mModel[15] = 1;
         Matrix.multiplyMM(mMvp, 0, mVp, 0, mModel, 0);
+        // Rotation only: the shader derives the face normal from the unit-cube position, so a
+        // non-uniform scale must not leak in here or the axes would fight each other.
         normal3[0] = r00; normal3[1] = r10; normal3[2] = r20;
         normal3[3] = r01; normal3[4] = r11; normal3[5] = r21;
         normal3[6] = r02; normal3[7] = r12; normal3[8] = r22;
     }
 
-    private void drawBox(float r, float g, float b, float alpha, EngineMaterial material, double specular) {
+    private void drawBox(float r, float g, float b, float alpha, EngineMaterial material, double specular,
+                         float isSpawn, int assetTexture, float hasAsset, int assetFace) {
         GLES20.glUseProgram(program);
         GLES20.glUniformMatrix4fv(uMvp, 1, false, mMvp, 0);
         GLES20.glUniformMatrix4fv(uModel, 1, false, mModel, 0);
@@ -592,13 +790,27 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1f(uEmissive, (float) material.emissive);
         GLES20.glUniform1f(uShininess, (float) material.shininess());
         GLES20.glUniform1f(uSpecular, (float) specular);
+        GLES20.glUniform1f(uIsSpawn, isSpawn);
+        GLES20.glUniform1f(uHasAsset, hasAsset);
+        GLES20.glUniform2f(uAssetTiles, (float) assetTilesU, (float) assetTilesV);
+        GLES20.glUniform1f(uAssetFace, hasAsset > 0 ? assetFace : -1f);
+        GLES20.glUniform1i(uAsset, 1);
+        bindTexture(1, assetTexture != 0 ? assetTexture : textures.atlasTexture());
+        GLES20.glUniform1i(uAtlas, 0);
         GLES20.glEnableVertexAttribArray(aPos);
         GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
-        GLES20.glEnableVertexAttribArray(aNormal);
-        GLES20.glVertexAttribPointer(aNormal, 3, GLES20.GL_FLOAT, false, 0, cubeNormals);
+        if (aLocal >= 0) {
+            GLES20.glEnableVertexAttribArray(aLocal);
+            GLES20.glVertexAttribPointer(aLocal, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
+        }
+        if (aFace >= 0) {
+            GLES20.glEnableVertexAttribArray(aFace);
+            GLES20.glVertexAttribPointer(aFace, 1, GLES20.GL_FLOAT, false, 0, faceBuffer);
+        }
         GLES20.glDrawElements(GLES20.GL_TRIANGLES, 36, GLES20.GL_UNSIGNED_SHORT, cubeIndices);
         GLES20.glDisableVertexAttribArray(aPos);
-        GLES20.glDisableVertexAttribArray(aNormal);
+        if (aLocal >= 0) GLES20.glDisableVertexAttribArray(aLocal);
+        if (aFace >= 0) GLES20.glDisableVertexAttribArray(aFace);
     }
 
     private void drawOutline(Instance part) {
@@ -610,9 +822,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
                 -hx, hy, -hz, hx, hy, -hz, hx, hy, -hz, hx, hy, hz, hx, hy, hz, -hx, hy, hz, -hx, hy, hz, -hx, hy, -hz,
                 -hx, -hy, -hz, -hx, hy, -hz, hx, -hy, -hz, hx, hy, -hz, hx, -hy, hz, hx, hy, hz, -hx, -hy, hz, -hx, hy, hz
         };
-        System.arraycopy(pts, 0, outlinePoints, 0, pts.length);
         setModel(c, 1, 1, 1);
-        FloatBuffer buf = floatBuffer(outlinePoints);
+        FloatBuffer buf = floatBuffer(pts);
         GLES20.glUseProgram(lineProgram);
         GLES20.glUniformMatrix4fv(lMvp, 1, false, mMvp, 0);
         GLES20.glUniform3f(lColor, 0.25f, 0.55f, 1f);
@@ -644,11 +855,111 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         double wy = origin[1] - scene.charHy + oyAboveFeet;
         double[] c = {wx, wy, wz, cy, 0, sy, 0, 1, 0, -sy, 0, cy};
         setModel(c, w, h, d);
-        drawBox(color[0], color[1], color[2], 1f, material, light.specularScale);
+        int materialTile = textures.materialTile(256);
+        FloatBuffer previous = null;
+        for (int face = 0; face < 6; face++) {
+            faceTiles[face * 4] = (materialTile % EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES;
+            faceTiles[face * 4 + 1] = (materialTile / EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES;
+            faceTiles[face * 4 + 2] = 1f / textures.tileStuds(materialTile);
+            faceTiles[face * 4 + 3] = textures.atlasTexture() != 0 ? 1f : 0f;
+        }
+        GLES20.glUniform4fv(uFaceTiles, 6, faceTiles, 0);
+        drawBox(color[0], color[1], color[2], 1f, material, light.specularScale, 0f,
+                textures.atlasTexture(), 0f, -1);
+    }
+
+    // ---------------------------------------------------------------- gizmo
+    /** Draws the Studio-style move/rotate/scale handles for the current selection. */
+    private void drawGizmo(EngineLighting light) {
+        Instance selection = scene.selection;
+        if (selection == null || !selection.isRenderable() || scene.playing) return;
+        int tool = scene.gizmoTool;
+        if (tool == EngineGizmo.GRAB) return;                       // grab has no handles
+        double[] c = selection.cframe();
+        double[] center = {c[0], c[1], c[2]};
+        double distance = Math.hypot(center[0] - scene.camEye[0], Math.hypot(center[1] - scene.camEye[1], center[2] - scene.camEye[2]));
+        double length = EngineGizmo.handleLength(distance, 60, viewportHeight, 1);
+        int total = 0;
+        if (tool == EngineGizmo.ROTATE) {
+            double radius = length * 0.9;
+            for (int axis = 0; axis < 3 && total + 96 <= GIZMO_LINE_VERTICES; axis++) {
+                double[] n = EngineGizmo.axis(axis);
+                double[] u = Math.abs(n[0]) > 0.5 ? new double[]{0, 1, 0} : new double[]{1, 0, 0};
+                double[] v = EngineGizmo.cross(n, u);
+                int steps = 48;
+                for (int i = 0; i < steps; i++) {
+                    double t0 = i * 2 * Math.PI / steps, t1 = (i + 1) * 2 * Math.PI / steps;
+                    total = addLine(total, center, u, v, radius, t0, t1);
+                }
+            }
+            drawGizmoLines(total, false);
+        } else {
+            for (int axis = 0; axis < 3; axis++) {
+                double[] d = EngineGizmo.axis(axis);
+                if (total + 4 <= GIZMO_LINE_VERTICES) {
+                    put(total++, (float) center[0], (float) center[1], (float) center[2]);
+                    put(total++, (float) (center[0] + d[0] * length), (float) (center[1] + d[1] * length), (float) (center[2] + d[2] * length));
+                }
+            }
+            drawGizmoLines(total, true);
+        }
+    }
+
+    private int addLine(int total, double[] center, double[] u, double[] v, double radius, double t0, double t1) {
+        if (total + 6 > GIZMO_LINE_VERTICES) return total;
+        put(total++, (float) (center[0] + (u[0] * Math.cos(t0) + v[0] * Math.sin(t0)) * radius),
+                (float) (center[1] + (u[1] * Math.cos(t0) + v[1] * Math.sin(t0)) * radius),
+                (float) (center[2] + (u[2] * Math.cos(t0) + v[2] * Math.sin(t0)) * radius));
+        put(total++, (float) (center[0] + (u[0] * Math.cos(t1) + v[0] * Math.sin(t1)) * radius),
+                (float) (center[1] + (u[1] * Math.cos(t1) + v[1] * Math.sin(t1)) * radius),
+                (float) (center[2] + (u[2] * Math.cos(t1) + v[2] * Math.sin(t1)) * radius));
+        return total;
+    }
+
+    private void put(int index, float x, float y, float z) {
+        if (index * 3 + 2 >= gizmoScratch.length) return;
+        gizmoScratch[index * 3] = x;
+        gizmoScratch[index * 3 + 1] = y;
+        gizmoScratch[index * 3 + 2] = z;
+    }
+
+    /** Handles are drawn per axis so each one is red/green/blue like Studio's gizmo. */
+    private void drawGizmoLines(int vertices, boolean axes) {
+        if (vertices == 0) return;
+        gizmoBuffer.clear();
+        gizmoBuffer.put(gizmoScratch, 0, vertices * 3);
+        gizmoBuffer.position(0);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glUseProgram(lineProgram);
+        GLES20.glUniformMatrix4fv(lMvp, 1, false, mVp, 0);
+        GLES20.glLineWidth(4f);
+        GLES20.glUniform1f(lAlpha, 1f);
+        GLES20.glEnableVertexAttribArray(lPos);
+        if (axes) {
+            float[][] colours = {{0.95f, 0.25f, 0.25f}, {0.30f, 0.85f, 0.30f}, {0.35f, 0.50f, 1f}};
+            for (int axis = 0; axis < 3; axis++) {
+                GLES20.glUniform3f(lColor, colours[axis][0], colours[axis][1], colours[axis][2]);
+                GLES20.glVertexAttribPointer(lPos, 3, GLES20.GL_FLOAT, false, 0, gizmoBuffer.position(axis * 2 * 3));
+                GLES20.glDrawArrays(GLES20.GL_LINES, 0, 2);
+            }
+        } else {
+            float[][] colours = {{0.95f, 0.25f, 0.25f}, {0.30f, 0.85f, 0.30f}, {0.35f, 0.50f, 1f}};
+            int perAxis = 96;                          // 48 segments per ring, 2 vertices each
+            for (int axis = 0; axis < 3; axis++) {
+                GLES20.glUniform3f(lColor, colours[axis][0], colours[axis][1], colours[axis][2]);
+                int start = axis * perAxis;
+                int count = Math.min(perAxis, Math.max(0, vertices - start));
+                if (count == 0) continue;
+                GLES20.glVertexAttribPointer(lPos, 3, GLES20.GL_FLOAT, false, 0, gizmoBuffer.position(start * 3));
+                GLES20.glDrawArrays(GLES20.GL_LINES, 0, count);
+            }
+        }
+        GLES20.glDisableVertexAttribArray(lPos);
+        GLES20.glLineWidth(1f);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
     }
 
     // ---------------------------------------------------------------- post pass
-    /** Frees the GL objects behind the post pass. */
     private void deleteTargets() {
         if (sceneTex != 0) {
             GLES20.glDeleteTextures(4, new int[]{sceneTex, scratchTex, halfTex, halfTex2}, 0);
@@ -665,11 +976,6 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         postAvailable = false;
     }
 
-    /**
-     * Builds the colour/depth targets the post pass needs and returns whether they can be used.
-     * The size is remembered even when the build fails, so an unsupported GPU is not retried every
-     * frame; a resize clears it and the pass is attempted once more.
-     */
     private boolean ensureTargets(int width, int height) {
         if (targetWidth == width && targetHeight == height) return postAvailable;
         releaseTargets();
@@ -685,7 +991,6 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             scratchFbo = framebuffer(scratchTex);
             halfFbo = framebuffer(halfTex);
             halfFbo2 = framebuffer(halfTex2);
-
             int[] rbs = new int[1];
             GLES20.glGenRenderbuffers(1, rbs, 0);
             sceneDepth = rbs[0];
@@ -693,7 +998,6 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             GLES20.glRenderbufferStorage(GLES20.GL_RENDERBUFFER, GLES20.GL_DEPTH_COMPONENT16, width, height);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, sceneFbo);
             GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_DEPTH_ATTACHMENT, GLES20.GL_RENDERBUFFER, sceneDepth);
-
             postAvailable = complete(sceneFbo) && complete(scratchFbo) && complete(halfFbo) && complete(halfFbo2);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         } catch (Throwable t) {
@@ -711,14 +1015,13 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private static int texture(int width, int height) {
         int[] ids = new int[1];
         GLES20.glGenTextures(1, ids, 0);
-        int id = ids[0];
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0]);
         GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, width, height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-        return id;
+        return ids[0];
     }
 
     private static int framebuffer(int tex) {
@@ -744,11 +1047,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     }
 
     private static void bindTexture(int unit, int tex) {
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex);
+        bindTextureTarget(unit, GLES20.GL_TEXTURE_2D, tex);
     }
 
-    /** Separable gaussian into another target: source must not be the current render target. */
+    /** Cubemaps must be bound to GL_TEXTURE_CUBE_MAP; binding them as 2D shows nothing. */
+    private static void bindTextureTarget(int unit, int target, int tex) {
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+        GLES20.glBindTexture(target, tex);
+    }
+
     private void blurPass(int sourceTex, int destFbo, int width, int height, float dx, float dy) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destFbo);
         GLES20.glViewport(0, 0, width, height);
@@ -759,12 +1066,10 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         drawQuad(blurPos);
     }
 
-    /** Applies the Lighting service's post-processing effects to the rendered frame. */
     private void composite(EngineLighting light) {
         int width = viewportWidth, height = viewportHeight;
         int halfW = Math.max(1, width / 2), halfH = Math.max(1, height / 2);
 
-        // BlurEffect: gaussian over the whole frame before anything else reads it.
         if (light.blur && light.blurSize > 0.5) {
             float radius = (float) Math.max(1, Math.min(56, light.blurSize)) * 0.5f;
             blurPass(sceneTex, scratchFbo, width, height, radius / width, 0);
@@ -779,7 +1084,6 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         boolean bloomWanted = light.bloom && light.bloomIntensity > 0.001;
         boolean raysWanted = light.sunRays && light.sunRaysIntensity > 0.001 && light.sunUp > 0.05 && sunOnScreen(light);
         if (bloomWanted) {
-            // Roblox authors BloomEffect.Threshold against an HDR frame; this LDR pass scales it in.
             float threshold = (float) Math.max(0.25, Math.min(0.95, light.bloomThreshold / 2.2));
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, halfFbo);
             GLES20.glViewport(0, 0, halfW, halfH);
@@ -824,7 +1128,6 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         drawQuad(postPos);
     }
 
-    /** Projects the sun into screen space for the sun-rays pass. */
     private boolean sunOnScreen(EngineLighting light) {
         double[] eye = scene.camEye;
         double px = eye[0] + light.sunDirection[0] * 2000, py = eye[1] + light.sunDirection[1] * 2000, pz = eye[2] + light.sunDirection[2] * 2000;

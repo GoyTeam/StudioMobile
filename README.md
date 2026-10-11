@@ -1,4 +1,4 @@
-# Studio Mobile (Unofficial) 0.5.0 — Roblox Studio, shaped for Android
+# Studio Mobile (Unofficial) 0.6.0 — Roblox Studio, shaped for Android
 
 Native Android app that manages Roblox place projects **and** now opens them in a real on-device
 3D engine: Explorer hierarchy, Properties inspector, GL viewport, editing tools, and a playable
@@ -27,7 +27,7 @@ password, no third-party engine runtime.
   an upload; there is no automatic retry and no fabricated success.
 - Safe thumbnail loading from Roblox CDNs with host allow-listing and bounded decoding.
 
-### 2. Engine editor (0.4 engine, 0.5 lighting)
+### 2. Engine editor (0.4 engine, 0.5 lighting, 0.6 textures + baseplate + gizmos)
 
 Open a place (project place or loose file) → **Edit**:
 
@@ -56,8 +56,15 @@ Open a place (project place or loose file) → **Edit**:
     a `Clouds` (under `Terrain`) draws wind-drifting procedural cloud cover.
   - **Local lights**: `PointLight`, `SpotLight` and `SurfaceLight` illuminate nearby parts with
     colour, `Brightness`, `Range`, `Face`/`Angle` cones and `Enabled` (four lit at a time).
-  - **Materials**: `Enum.Material` and `Reflectance` drive metalness, roughness, emissive surfaces
-    (Neon, CrackedLava, ForceField) and specular highlights.
+- **Materials and surface textures (new in 0.6.0)**: an 8-tile procedural material/surface atlas
+  (one tile per `Enum.Material` and per `SurfaceType`: Studs, Inlet, Universal, Hinge, Motor,
+  SteppingMotor, Weld, Glue) is world-aligned per face exactly like Roblox tiles them, and the
+  part colour is multiplied by the matching greyscale tile the way Roblox multiplies its material
+  maps by part colour. Roblox-built-in `rbxasset://` textures are skipped (they belong to the
+  client), but real `Texture`, `Decal`, `SurfaceAppearance.ColorMap` and `MeshPart.TextureID`
+  assets are fetched from Roblox Open Cloud asset delivery (or the public thumbnail CDN when no
+  creator key is set), decoded once, cached on disk and uploaded to GL textures off the render
+  thread, plus the six `Sky` cube-face assets build a streamed sky cubemap when all six arrive.
   - **Post-processing**: `ColorCorrectionEffect` (brightness/contrast/saturation/tint),
     `BloomEffect`, `BlurEffect`, `SunRaysEffect` and `ExposureCompensation` run as a framebuffer
     post pass; a `DepthOfFieldEffect` is reported in the limits dialog but not rendered yet.
@@ -77,10 +84,21 @@ Open a place (project place or loose file) → **Edit**:
 - Lighting is complete for the properties above, with four documented approximations: no shadow
   maps (`GlobalShadows` is read and reported, faces away from the sun are simply darker), no
   environment probe for `EnvironmentDiffuseScale`, procedural sky/clouds instead of Roblox skybox
-  and cloud textures (asset ids this build cannot download), and `DepthOfFieldEffect` is not
+  and cloud textures (asset ids this build cannot download), and    `DepthOfFieldEffect` is not
   rendered. The in-app **Engine limits** dialog lists exactly this.
-- Unions/MeshParts render and collide as boxes; terrain, textures, decals, particles, animations
-  and GUIs are not drawn yet. `SurfaceAppearance`/`MaterialVariant` texture maps are not applied.
+- **True Roblox baseplate (new in 0.6.0)**: new places start from a genuine Roblox baseplate
+  template — a 512×20×512 `Part` at `Plastic` material, colour #A3A2A5 (the Roblox Studio baseplate
+  neutral grey), with its bottom face at Y = -10 so the top face sits exactly at Y = 0, Smooth (0)
+  surfaces on every side, and a 6×1×6 `SpawnLocation` standing on top of the baseplate (its bottom
+  face at Y = 0) so the spawn pad never sits inside the baseplate. `PlaceTemplate` matches the studio
+  baseplate geometry, colour, material and spawn placement, and the template round-trips cleanly
+  through the decoder and writer.
+- **Transform gizmo (new in 0.6.0)**: a Roblox-Studio-style move/rotate/scale gizmo replaces the
+  old +/- X/Y/Z button pad and the on-screen editor-camera joystick. Selected parts show move
+  arrows, rotate rings and scale handles that keep a constant screen size with distance, tap-to-
+  select handle picking, drags along a handle's axis (move), around an axis (rotate) or on the
+  camera-facing plane (grab), per-axis scale, 1-stud grid snap, and 40-step undo/redo with no
+  history entry for handle touches that move nothing.
 - Rotated parts collide as axis-aligned boxes in play mode.
 - `.rbxl` files using **ZSTD** post-compression are detected and reported clearly instead of being
   half-parsed: re-save them as `.rbxlx` in desktop Studio, or wait for the ZSTD reader.

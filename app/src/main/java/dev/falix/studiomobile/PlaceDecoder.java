@@ -63,6 +63,8 @@ final class PlaceDecoder {
         private boolean inProperties;
         private String propTag, propName;
         private final StringBuilder text = new StringBuilder();
+        /** True while the X/Y/Z children currently being read belong to a CoordinateFrame, not a Vector3. */
+        private boolean coordinateFrame;
         private final double[] vec = new double[3];
         private final double[] cf = new double[12];
         private final int[] color = new int[3];
@@ -130,10 +132,11 @@ final class PlaceDecoder {
                 raw = new StringBuilder().append('<').append(qName).append(attrs(a)).append('>');
                 rawStack.add(qName);
             }
-            if ("Vector3".equals(qName)) { vec[0] = vec[1] = vec[2] = 0; }
+            if ("Vector3".equals(qName)) { vec[0] = vec[1] = vec[2] = 0; coordinateFrame = false; }
             if ("CoordinateFrame".equals(qName) || "CFrame".equals(qName)) {
                 double[] identity = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1};
                 System.arraycopy(identity, 0, cf, 0, 12);
+                coordinateFrame = true;
             }
         }
 
@@ -149,9 +152,11 @@ final class PlaceDecoder {
             if (!inProperties || propTag == null) return;
             String t = text.toString().trim();
             if (!qName.equals(propTag)) {
-                if ("X".equals(qName)) vec[0] = number(t, vec[0]);
-                else if ("Y".equals(qName)) vec[1] = number(t, vec[1]);
-                else if ("Z".equals(qName)) vec[2] = number(t, vec[2]);
+                // Vector3 and CoordinateFrame both nest X/Y/Z, so the open container decides where
+                // the numbers belong. Getting this wrong silently zeroed every part position.
+                if ("X".equals(qName)) { if (coordinateFrame) cf[0] = number(t, cf[0]); else vec[0] = number(t, vec[0]); }
+                else if ("Y".equals(qName)) { if (coordinateFrame) cf[1] = number(t, cf[1]); else vec[1] = number(t, vec[1]); }
+                else if ("Z".equals(qName)) { if (coordinateFrame) cf[2] = number(t, cf[2]); else vec[2] = number(t, vec[2]); }
                 else if ("R".equals(qName)) color[0] = (int) Math.round(number(t, 0) * 255);
                 else if ("G".equals(qName)) color[1] = (int) Math.round(number(t, 0) * 255);
                 else if ("B".equals(qName)) color[2] = (int) Math.round(number(t, 0) * 255);
@@ -175,8 +180,8 @@ final class PlaceDecoder {
                 case "double": if (name != null) { item.props.put(name, number(t, 0)); item.tags.put(name, "double"); } break;
                 case "Color3uint8": if (name != null) item.props.put(name, (int) (longValue(t) & 0xFFFFFFL)); break;
                 case "Color3": if (name != null) { item.props.put(name, color.clone()); item.tags.put(name, "Color3"); } break;
-                case "Vector3": if (name != null) item.props.put(name, new Instance.Vector3(vec[0], vec[1], vec[2])); break;
-                case "CoordinateFrame": case "CFrame": if (name != null) item.props.put(name, cf.clone()); break;
+                case "Vector3": if (name != null) item.props.put(name, new Instance.Vector3(vec[0], vec[1], vec[2])); coordinateFrame = false; break;
+                case "CoordinateFrame": case "CFrame": if (name != null) item.props.put(name, cf.clone()); coordinateFrame = false; break;
                 default: break;
             }
             propTag = null;

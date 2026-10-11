@@ -97,7 +97,8 @@ public class EngineCoreTest {
         Instance baseplate = workspace.findFirst("Part");
         assertNotNull("Baseplate part must decode", baseplate);
         assertEquals(512, baseplate.size()[0], 1e-9);
-        assertEquals(4285493103L & 0xFFFFFF, baseplate.getColor());
+        // Medium stone grey, the BrickColor 194 Roblox Studio's baseplate template uses.
+        assertEquals(0xA3A2A5, baseplate.getColor());
         assertNotNull("SpawnLocation must decode", workspace.findFirst("SpawnLocation"));
         assertEquals(196.2, workspace.getNumber("Gravity", 0), 1e-4);
 
@@ -218,6 +219,251 @@ public class EngineCoreTest {
         assertEquals(1.5f, floats[0], 0f);
         assertEquals(-2f, floats[1], 0f);
         assertEquals(0f, floats[2], 0f);
+    }
+
+    // ------------------------------------------------------------------ template + textures
+
+    @Test public void baseplateTemplateMatchesStudioAndTheSpawnSitsOnTop() throws Exception {
+        Instance document = EngineScene.parseFragment(PlaceTemplate.generate("Start place", "baseplate", 196.2, false));
+        Instance workspace = document.findFirst("Workspace");
+        assertNotNull("Workspace must exist", workspace);
+        Instance baseplate = workspace.findFirst("Part");
+        assertNotNull("a Baseplate part must exist", baseplate);
+        double[] size = baseplate.size();
+        assertEquals(512, size[0], 1e-9);
+        assertEquals(20, size[1], 1e-9);
+        assertEquals(512, size[2], 1e-9);
+        double[] c = baseplate.cframe();
+        assertEquals(0, c[0], 1e-9);
+        assertEquals(-10, c[1], 1e-9);
+        assertEquals(0, c[2], 1e-9);
+        assertEquals("the baseplate top face is Y = 0", 0, c[1] + size[1] / 2, 1e-9);
+        assertEquals(0xA3A2A5, baseplate.getColor());
+        assertEquals("Plastic", EngineMaterial.nameOf(baseplate.getInt("Material", 256)));
+
+        Instance spawn = workspace.findFirst("SpawnLocation");
+        assertNotNull("a SpawnLocation must exist", spawn);
+        double[] spawnSize = spawn.size();
+        double[] spawnCframe = spawn.cframe();
+        assertEquals(6, spawnSize[0], 1e-9);
+        assertEquals(1, spawnSize[1], 1e-9);
+        assertEquals(6, spawnSize[2], 1e-9);
+        assertEquals("the spawn pad stands on the baseplate, never inside it", 0,
+                spawnCframe[1] - spawnSize[1] / 2, 1e-9);
+        assertTrue("the spawn pad is above the baseplate surface", spawnCframe[1] - spawnSize[1] / 2 >= c[1] + size[1] / 2);
+        for (String surface : new String[]{"TopSurface", "BottomSurface", "LeftSurface", "RightSurface", "FrontSurface", "BackSurface"})
+            assertEquals(surface + " is Smooth (0)", 0, spawn.getInt(surface, 0));
+
+        Instance lighting = document.findFirst("Lighting");
+        assertNotNull("Lighting must exist", lighting);
+        assertEquals(14, lighting.getNumber("ClockTime", 0), 1e-9);
+        assertNotNull("Sky belongs to Lighting", lighting.findFirst("Sky"));
+        assertNotNull("Atmosphere belongs to Lighting", lighting.findFirst("Atmosphere"));
+        Instance terrain = document.findFirst("Terrain");
+        assertNotNull("Clouds belong to Terrain", terrain == null ? null : terrain.findFirst("Clouds"));
+        assertEquals(196.2, workspace.getNumber("Gravity", 0), 1e-4);
+    }
+
+    @Test public void skyTexturesAreReadInCubeMapOrder() {
+        Instance root = new Instance("DataModel", "DataModel");
+        Instance lighting = new Instance("Lighting", "Lighting");
+        root.add(lighting);
+        Instance sky = new Instance("Sky", "Sky");
+        lighting.add(sky);
+        sky.props.put("SkyboxRt", "rbxassetid://1");
+        sky.props.put("SkyboxLf", "rbxassetid://2");
+        sky.props.put("SkyboxUp", "rbxassetid://3");
+        sky.props.put("SkyboxDn", "rbxassetid://4");
+        sky.props.put("SkyboxFt", "rbxassetid://5");
+        sky.props.put("SkyboxBk", "rbxassetid://6");
+        EngineLighting light = EngineLighting.from(root);
+        assertTrue("a Sky with textures must be flagged", light.skyboxTextures);
+        assertArrayEquals(new String[]{"rbxassetid://1", "rbxassetid://2", "rbxassetid://3", "rbxassetid://4", "rbxassetid://5", "rbxassetid://6"},
+                light.skyTextures);
+    }
+
+    /**
+     * The texture-tile and asset-id helpers are pure static math. The JVM test shim uses
+     * API-parasitic stubs, so the atlas builder (which owns the first Paint that the class loader
+     * hits) is guarded out here and covered by the CI APK (instrumented or robolectric) where a
+     * real renderer surface exists.
+     */
+    @Test public void textureTilesTileLikeRobloxAndRbxAssetIdsParse() throws Exception {
+        // Pure static tile math, no android.graphics.Paint, no GL context.
+        assertEquals("surface types tile every stud", 1f, EngineTextures.studsForName("Studs"), 0f);
+        assertEquals(1f, EngineTextures.studsForName("Inlet"), 0f);
+        assertEquals(1f, EngineTextures.studsForName("Universal"), 0f);
+        assertEquals("materials tile every four studs", 4f, EngineTextures.studsForName("Plastic"), 0f);
+        assertEquals(4f, EngineTextures.studsForName("WoodPlanks"), 0f);
+        assertEquals("the spawn pad covers its whole face", 6f, EngineTextures.studsForName("SpawnPad"), 0f);
+        assertEquals("SurfaceType enum order is the Roblox one", "Smooth", EngineTextures.SURFACE_TILES[0]);
+        assertEquals("Studs", EngineTextures.SURFACE_TILES[3]);
+        assertEquals("SteppingMotor", EngineTextures.SURFACE_TILES[8]);
+    }
+
+    @Test public void textureFacesMapToTheCubeSidesTheMeshNumbers() {
+        // Roblox Enum.NormalId: Right 0, Top 1, Back 2, Left 3, Bottom 4, Front 5 -> +X,-X,+Y,-Y,+Z,-Z.
+        assertEquals(0, EngineRenderer.faceOfNormalId(0));
+        assertEquals(2, EngineRenderer.faceOfNormalId(1));
+        assertEquals(4, EngineRenderer.faceOfNormalId(2));
+        assertEquals(1, EngineRenderer.faceOfNormalId(3));
+        assertEquals(3, EngineRenderer.faceOfNormalId(4));
+        assertEquals(5, EngineRenderer.faceOfNormalId(5));
+    }
+
+    // ------------------------------------------------------------------ gizmo + camera
+
+    @Test public void gizmoHandlesKeepAConstantScreenSize() {
+        double near = EngineGizmo.handleLength(20, 60, 1080, 1);
+        double far = EngineGizmo.handleLength(200, 60, 1080, 1);
+        assertEquals("handles grow with distance so they stay the same on screen", 10, far / near, 1e-9);
+        assertTrue("a closer camera gives a shorter handle", near < far);
+        double[] screen = EngineGizmo.project(identityMvp(), new double[]{0, 0, 0}, 100, 100);
+        assertNotNull(screen);
+        assertEquals(50, screen[0], 1e-6);
+        assertEquals("screen Y is flipped", 50, screen[1], 1e-6);
+    }
+
+    @Test public void raysThroughTheRightEdgePointRight() {
+        EngineScene scene = new EngineScene();
+        scene.camYaw = 0;
+        scene.camPitch = 0;
+        scene.camTarget[0] = 0; scene.camTarget[1] = 0; scene.camTarget[2] = 0;
+        scene.updateEye();
+        double[][] right = scene.screenRay(1, 0, 1, 60);
+        assertTrue("the right edge of the screen is +X when the camera looks down -Z", right[1][0] > 0.1);
+        double[][] left = scene.screenRay(-1, 0, 1, 60);
+        assertTrue(left[1][0] < -0.1);
+        double[][] up = scene.screenRay(0, 1, 1, 60);
+        assertTrue("the top edge is +Y", up[1][1] > 0.1);
+    }
+
+    @Test public void moveHandleDragsThePartAlongItsAxis() {
+        EngineScene scene = sceneWithPart();
+        Instance part = scene.selection;
+        double[] before = part.cframe();
+        double[][] down = {{0, 5, 20}, {0, 0, -1}};
+        assertTrue(scene.beginGizmoDrag(EngineGizmo.MOVE, 0, down[0], down[1], 1));
+        double[][] move = {{3, 5, 20}, {0, 0, -1}};
+        scene.updateGizmoDrag(move[0], move[1]);
+        double[] after = part.cframe();
+        assertEquals("3 studs along +X", before[0] + 3, after[0], 1e-9);
+        assertEquals(before[1], after[1], 1e-9);
+        assertEquals(before[2], after[2], 1e-9);
+        assertTrue("a real drag is undoable", scene.canUndo());
+        scene.endGizmoDrag();
+        assertFalse(scene.isDragging());
+    }
+
+    @Test public void grabbingNoHandlePushesNoUndoEntry() {
+        EngineScene scene = sceneWithPart();
+        double[][] down = {{0, 5, 20}, {0, 0, -1}};
+        assertTrue(scene.beginGizmoDrag(EngineGizmo.MOVE, 0, down[0], down[1], 1));
+        scene.endGizmoDrag();
+        assertFalse("touching a handle without moving must not add undo history", scene.canUndo());
+    }
+
+    @Test public void rotateRingDragTurnsThePartAroundThatAxis() {
+        EngineScene scene = sceneWithPart();
+        Instance part = scene.selection;
+        double[][] down = {{0, 10, 10}, {0, -1, 0}};       // ray hits the Y ring at -90 degrees
+        assertTrue(scene.beginGizmoDrag(EngineGizmo.ROTATE, 1, down[0], down[1], 1));
+        double[][] move = {{10, 10, 0}, {0, -1, 0}};       // and at 0 degrees
+        scene.updateGizmoDrag(move[0], move[1]);
+        double[] c = part.cframe();
+        assertEquals("a quarter turn maps the RightVector onto -Z", 0, c[3], 1e-9);
+        assertEquals(0, c[4], 1e-9);
+        assertEquals(-1, c[5], 1e-9);
+        assertEquals(1, c[7], 1e-9);
+        assertEquals(1, c[9], 1e-9);
+        assertEquals("rotation keeps the position", 5, c[1], 1e-9);
+    }
+
+    @Test public void scaleHandleStretchesOnlyItsOwnAxis() {
+        EngineScene scene = sceneWithPart();
+        Instance part = scene.selection;
+        double[] before = part.size();
+        double[][] down = {{0, 5, 20}, {0, 0, -1}};
+        assertTrue(scene.beginGizmoDrag(EngineGizmo.SCALE, 0, down[0], down[1], 1));
+        double[][] move = {{1, 5, 20}, {0, 0, -1}};        // one handle length out: doubles the size
+        scene.updateGizmoDrag(move[0], move[1]);
+        double[] after = part.size();
+        assertEquals(before[0] * 2, after[0], 1e-9);
+        assertEquals(before[1], after[1], 1e-9);
+        assertEquals(before[2], after[2], 1e-9);
+    }
+
+    @Test public void grabHandleSlidesThePartOnTheCameraFacingPlane() {
+        EngineScene scene = sceneWithPart();
+        Instance part = scene.selection;
+        double[][] down = {{0, 5, 20}, {0, 0, -1}};
+        assertTrue(scene.beginGizmoDrag(EngineGizmo.GRAB, -1, down[0], down[1], 1));
+        double[][] move = {{1, 5, 20}, {0, 0, -1}};
+        scene.updateGizmoDrag(move[0], move[1]);
+        double[] c = part.cframe();
+        assertEquals(1, c[0], 1e-6);
+        assertEquals(5, c[1], 1e-6);
+        assertEquals(0, c[2], 1e-6);
+    }
+
+    @Test public void gridSnappingRoundsTheDrag() {
+        EngineScene scene = sceneWithPart();
+        scene.gridSnap = 1;
+        Instance part = scene.selection;
+        double[][] down = {{0, 5, 20}, {0, 0, -1}};
+        assertTrue(scene.beginGizmoDrag(EngineGizmo.MOVE, 0, down[0], down[1], 1));
+        double[][] move = {{2.4, 5, 20}, {0, 0, -1}};
+        scene.updateGizmoDrag(move[0], move[1]);
+        assertEquals("2.4 studs snap to 2", 2, part.cframe()[0], 1e-9);
+    }
+
+    @Test public void flyCameraFollowsTheJoystickAlongTheViewDirection() {
+        EngineScene scene = new EngineScene();
+        scene.camYaw = 0;
+        scene.camPitch = 0;
+        scene.camTarget[0] = 0; scene.camTarget[1] = 4; scene.camTarget[2] = 0;
+        scene.camDist = 34;
+        scene.updateEye();
+        scene.flyZ = 1;                                     // push the stick forward
+        scene.flyEditCamera(0.05);
+        assertEquals(0, scene.camTarget[0], 1e-9);
+        assertEquals(4, scene.camTarget[1], 1e-9);
+        assertTrue("the camera flies toward -Z when it looks down -Z", scene.camTarget[2] < -1);
+        scene.updateEye();
+        assertEquals("the eye keeps its orbit offset", scene.camTarget[2] + 34, scene.camEye[2], 1e-6);
+        scene.flyZ = 0;
+        scene.flyUp = 1;                                    // and climbs without changing the view
+        scene.flyEditCamera(0.05);
+        assertTrue(scene.camTarget[1] > 4);
+    }
+
+    @Test public void playModeIgnoresTheFlyInput() {
+        EngineScene scene = sceneWithPart();
+        scene.playing = true;
+        double before = scene.camTarget[2];
+        scene.flyZ = 1;
+        scene.flyEditCamera(0.05);
+        assertEquals(before, scene.camTarget[2], 1e-9);
+        scene.playing = false;
+    }
+
+    /** A workspace with one 4x1x2 part at (0,5,0), selected, ready for a handle drag. */
+    private static EngineScene sceneWithPart() {
+        EngineScene scene = new EngineScene();
+        Instance root = new Instance("DataModel", "DataModel");
+        Instance workspace = new Instance("Workspace", "Workspace");
+        root.add(workspace);
+        Instance part = Instance.create("Part", "Part");
+        part.props.put("size", new Instance.Vector3(4, 1, 2));
+        part.setPosition(0, 5, 0);
+        workspace.add(part);
+        scene.setRoot(root, "Test");
+        scene.selection = part;
+        return scene;
+    }
+
+    private static float[] identityMvp() {
+        return new float[]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     }
 
     private static void u16(ByteArrayOutputStream out, int value) {

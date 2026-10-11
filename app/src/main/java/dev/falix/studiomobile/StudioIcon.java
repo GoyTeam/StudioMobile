@@ -50,6 +50,9 @@ final class StudioIcon extends View {
             case "layers":path(canvas,new float[]{12,3,21,8,12,13,3,8,12,3});path(canvas,new float[]{3,12,12,17,21,12});path(canvas,new float[]{3,16,12,21,21,16});break;
             case "list":path(canvas,new float[]{8,6,21,6});path(canvas,new float[]{8,12,21,12});path(canvas,new float[]{8,18,21,18});canvas.drawCircle(4.5f,6,1.4f,paint);canvas.drawCircle(4.5f,12,1.4f,paint);canvas.drawCircle(4.5f,18,1.4f,paint);break;
             case "logout":path(canvas,new float[]{10,3,4,3,4,21,10,21});canvas.drawLine(9,12,22,12,paint);path(canvas,new float[]{17,7,22,12,17,17});break;
+            case "hand":path(canvas,new float[]{8,11,8,6.5f,11,6.5f,11,11});path(canvas,new float[]{11,11,11,4.5f,14,4.5f,14,11});path(canvas,new float[]{14,11,14,6,17,6,17,11});path(canvas,new float[]{8,11,6,11,4.5f,13,4.5f,16.5f,7,20,13,20.5f,18.5f,20,17,12,17,11});break;
+            case "grid":canvas.drawRect(3,3,10.5f,10.5f,paint);canvas.drawRect(13.5f,3,21,10.5f,paint);canvas.drawRect(3,13.5f,10.5f,21,paint);canvas.drawRect(13.5f,13.5f,21,21,paint);break;
+            case "texture":canvas.drawRect(3,5,21,19,paint);path(canvas,new float[]{3,15,8,10,12,14,16,9,21,14});canvas.drawCircle(8,9,1.4f,paint);break;
             default:canvas.drawCircle(12,12,9,paint);canvas.drawLine(12,10,12,17,paint);canvas.drawPoint(12,6,paint);
         }canvas.restore();
     }

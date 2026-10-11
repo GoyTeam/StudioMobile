@@ -23,6 +23,16 @@ final class EngineScene {
 
     // ---- edit tools
     double[] focusPoint = {0, 0, 0};
+    /** Studio tool: {@link EngineGizmo#MOVE}, ROTATE, SCALE or GRAB. */
+    volatile int gizmoTool = EngineGizmo.MOVE;
+    /** View-projection matrix of the last rendered frame, published by the renderer for picking. */
+    final float[] viewProjection = new float[16];
+
+    // ---- editor fly camera (on-screen joystick), each -1..1
+    volatile double flyX, flyZ, flyUp;
+    double flySpeed = 34;
+    /** Grid snapping for the transform tools, in studs (0 = off). */
+    double gridSnap;
 
     // ---- play state (fields touched by both UI and GL threads are volatile)
     volatile boolean playing;
@@ -94,11 +104,52 @@ final class EngineScene {
             x = p[0]; y = p[1]; z = p[2];
             if (inst.props.containsKey("CFrame")) y += selection.size()[1] / 2 + inst.size()[1] / 2 + 0.1;
         } else if (inst.props.containsKey("CFrame")) y += inst.size()[1] / 2 + 0.25;
-        Instance parent = (selection != null && (selection.className.equals("Model") || selection.className.equals("Folder"))) ? selection : workspace;
+        Instance parent = insertParent(cls);
         parent.add(inst);
         selection = inst;
         markDirty();
         return inst;
+    }
+
+    /**
+     * Where a new instance belongs, the way Studio files things: effects and descriptors stay with
+     * the part or service that owns them, Lighting classes go into Lighting, and everything else
+     * lands in the selected container or Workspace.
+     */
+    Instance insertParent(String cls) {
+        Instance target = selection;
+        if (target != null && !target.isService() && !target.className.equals("Model") && !target.className.equals("Folder")
+                && !target.className.equals("Terrain") && !target.className.equals("Camera")) {
+            if (PART_CHILD.contains(cls) && target.isRenderable()) return target;
+            target = null;
+        }
+        if (target != null) return target;
+        Instance home = serviceFor(cls);
+        if (home != null) return home;
+        return workspace == null ? root : workspace;
+    }
+
+    private static final java.util.HashSet<String> PART_CHILD = new java.util.HashSet<>(java.util.Arrays.asList(
+            "Decal", "Texture", "SurfaceAppearance", "ParticleEmitter", "Fire", "Smoke", "Sparkles", "Trail", "Beam",
+            "PointLight", "SpotLight", "SurfaceLight", "Attachment", "Sound"));
+
+    private static final HashMap<String, String> SERVICE_HOME = new HashMap<>();
+    static {
+        for (String cls : new String[]{"Sky", "Atmosphere", "BloomEffect", "BlurEffect", "ColorCorrectionEffect",
+                "SunRaysEffect", "DepthOfFieldEffect", "ColorGradingEffect"}) SERVICE_HOME.put(cls, "Lighting");
+        for (String cls : new String[]{"Clouds", "Terrain"}) SERVICE_HOME.put(cls, "Workspace");
+        for (String cls : new String[]{"ScreenGui", "BillboardGui", "SurfaceGui"}) SERVICE_HOME.put(cls, "StarterGui");
+    }
+
+    private Instance serviceFor(String cls) {
+        String name = SERVICE_HOME.get(cls);
+        if (name == null || root == null) return null;
+        Instance service = root.findFirst(name);
+        if (service == null) {
+            service = new Instance(name, name);
+            root.add(service);
+        }
+        return service;
     }
 
     synchronized void deleteSelection() {
@@ -345,6 +396,127 @@ final class EngineScene {
         }
     }
 
+    /**
+     * Editor fly camera, driven by the on-screen joystick and run from the GL thread. Moving the
+     * orbit target is enough because {@link #updateEye()} derives the eye from it every frame, and
+     * pushing forward while looking up climbs, exactly like Roblox Studio's WASD fly camera.
+     */
+    void flyEditCamera(double dt) {
+        if (playing || dt <= 0) return;
+        double mx = flyX, mz = flyZ, mu = flyUp;
+        double magnitude = Math.sqrt(mx * mx + mz * mz + mu * mu);
+        if (magnitude < 0.05) return;
+        dt = Math.min(dt, 0.05);
+        double[] forward = normalize(camTarget[0] - camEye[0], camTarget[1] - camEye[1], camTarget[2] - camEye[2]);
+        double[] right = normalize(cross(forward, new double[]{0, 1, 0}));
+        double[] up = cross(right, forward);
+        double step = flySpeed * Math.min(1, magnitude) * dt;
+        camTarget[0] += (right[0] * mx + forward[0] * mz + up[0] * mu) * step;
+        camTarget[1] += (right[1] * mx + forward[1] * mz + up[1] * mu) * step;
+        camTarget[2] += (right[2] * mx + forward[2] * mz + up[2] * mu) * step;
+    }
+
+    // ------------------------------------------------------------------ gizmo dragging
+    private boolean dragging;
+    private int dragTool = -1, dragAxis = -1;
+    private double[] dragStartCframe, dragStartAxis, dragCenter;
+    private double dragStartParameter, dragStartAngle, dragHandleLength, dragStartScale;
+    private double[] dragPlaneNormal, dragPlanePoint;
+    private boolean dragPushed;                 // undo is captured on the first real movement
+
+    boolean isDragging() { return dragging; }
+    int dragTool() { return dragTool; }
+    int dragAxis() { return dragAxis; }
+
+    /**
+     * Starts a handle drag. `handleLength` is the same world length the renderer draws the handles
+     * with, so a drag of one handle length doubles a scale or moves one handle length.
+     */
+    synchronized boolean beginGizmoDrag(int tool, int axis, double[] rayOrigin, double[] rayDir, double handleLength) {
+        if (selection == null || selection.isService() || playing) return false;
+        if (tool != EngineGizmo.GRAB && !selection.isRenderable()) return false;
+        if (tool == EngineGizmo.GRAB && !selection.isRenderable() && !selection.className.equals("Model") && !selection.className.equals("Folder")) return false;
+        double[] c = selection.cframe();
+        if (c == null) return false;
+        dragStartCframe = c.clone();
+        dragCenter = new double[]{c[0], c[1], c[2]};
+        dragTool = tool;
+        dragAxis = axis;
+        dragHandleLength = Math.max(0.35, handleLength);
+        dragStartAxis = axis >= 0 && axis < 3 ? EngineGizmo.axis(axis) : null;
+        if (tool == EngineGizmo.MOVE || tool == EngineGizmo.SCALE) {
+            if (dragStartAxis == null) return false;
+            dragStartParameter = EngineGizmo.rayAxisParameter(rayOrigin, rayDir, dragCenter, dragStartAxis);
+            dragStartScale = dragStartAxis[0] != 0 ? Math.abs(selection.size()[0])
+                    : dragStartAxis[1] != 0 ? Math.abs(selection.size()[1]) : Math.abs(selection.size()[2]);
+        } else if (tool == EngineGizmo.ROTATE) {
+            if (dragStartAxis == null) return false;
+            dragStartAngle = EngineGizmo.ringAngle(rayOrigin, rayDir, dragCenter, axis);
+            if (Double.isNaN(dragStartAngle)) return false;
+        } else {
+            // Grab: slide along the plane through the part that faces the camera.
+            double[] normal = normalize(camEye[0] - c[0], camEye[1] - c[1], camEye[2] - c[2]);
+            dragPlaneNormal = normal;
+            dragPlanePoint = EngineGizmo.rayPlanePoint(rayOrigin, rayDir, dragCenter, normal);
+            if (dragPlanePoint == null) return false;
+        }
+        dragging = true;
+        dragPushed = false;
+        return true;
+    }
+
+    /** Applies the current touch ray to the running drag. */
+    synchronized void updateGizmoDrag(double[] rayOrigin, double[] rayDir) {
+        if (!dragging || selection == null || dragStartCframe == null) return;
+        if (!dragPushed) { pushUndo(); dragPushed = true; }
+        double[] c = dragStartCframe.clone();
+        if (dragTool == EngineGizmo.MOVE) {
+            double parameter = EngineGizmo.rayAxisParameter(rayOrigin, rayDir, dragCenter, dragStartAxis);
+            double delta = parameter - dragStartParameter;
+            if (gridSnap > 0) delta = Math.round(delta / gridSnap) * gridSnap;
+            c[0] += dragStartAxis[0] * delta;
+            c[1] += dragStartAxis[1] * delta;
+            c[2] += dragStartAxis[2] * delta;
+            selection.setCframe(c);
+            markDirty();
+        } else if (dragTool == EngineGizmo.SCALE) {
+            double parameter = EngineGizmo.rayAxisParameter(rayOrigin, rayDir, dragCenter, dragStartAxis);
+            double factor = Math.max(0.05, Math.min(20, 1 + (parameter - dragStartParameter) / dragHandleLength));
+            double[] size = selection.size();
+            double value = Math.max(0.05, Math.min(4096, dragStartScale * factor));
+            if (gridSnap > 0) value = Math.max(gridSnap, Math.round(value / gridSnap) * gridSnap);
+            size[dragAxis] = value;
+            selection.props.put("size", new Instance.Vector3(size[0], size[1], size[2]));
+            markDirty();
+        } else if (dragTool == EngineGizmo.ROTATE) {
+            double angle = EngineGizmo.ringAngle(rayOrigin, rayDir, dragCenter, dragAxis);
+            if (Double.isNaN(angle)) return;
+            double delta = angle - dragStartAngle;
+            while (delta > Math.PI) delta -= 2 * Math.PI;
+            while (delta < -Math.PI) delta += 2 * Math.PI;
+            if (gridSnap > 0) delta = Math.round(delta / (Math.PI / 12)) * (Math.PI / 12);
+            double[] rotation = EngineGizmo.multiply(EngineGizmo.rotationMatrix(dragAxis, delta), EngineGizmo.rotationOf(dragStartCframe));
+            selection.setCframe(EngineGizmo.withRotation(c, EngineGizmo.rotationToCframeLayout(rotation)));
+            markDirty();
+        } else {
+            double[] point = EngineGizmo.rayPlanePoint(rayOrigin, rayDir, dragCenter, dragPlaneNormal);
+            if (point == null) return;
+            c[0] += point[0] - dragPlanePoint[0];
+            c[1] += point[1] - dragPlanePoint[1];
+            c[2] += point[2] - dragPlanePoint[2];
+            selection.setCframe(c);
+            markDirty();
+        }
+    }
+
+    void endGizmoDrag() {
+        dragging = false;
+        dragPushed = false;
+        dragTool = -1;
+        dragAxis = -1;
+        dragStartCframe = null;
+    }
+
     void focus(Instance target) {
         if (target == null) return;
         double[] c = target.cframe();
@@ -359,7 +531,7 @@ final class EngineScene {
     double[][] screenRay(double ndcX, double ndcY, double aspect, double fovDeg) {
         double[] eye = camEye;
         double[] forward = normalize(camTarget[0] - eye[0], camTarget[1] - eye[1], camTarget[2] - eye[2]);
-        double[] right = normalize(forward[2], 0, -forward[0]);
+        double[] right = normalize(cross(forward, new double[]{0, 1, 0}));
         double[] up = cross(right, forward);
         double tan = Math.tan(Math.toRadians(fovDeg) / 2);
         double[] dir = normalize(
@@ -368,6 +540,8 @@ final class EngineScene {
                 forward[2] + right[2] * ndcX * tan * aspect + up[2] * ndcY * tan);
         return new double[][]{eye.clone(), dir};
     }
+
+    static double[] normalize(double[] v) { return normalize(v[0], v[1], v[2]); }
 
     static double[] normalize(double x, double y, double z) {
         double l = Math.sqrt(x * x + y * y + z * z);

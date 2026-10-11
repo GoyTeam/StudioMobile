@@ -45,6 +45,12 @@ final class EngineLighting {
     boolean sky;
     boolean celestialBodiesShown = true;
     double sunAngularSize = 21, moonAngularSize = 11, starCount = 3000;
+    /**
+     * `Sky.SkyboxRt/Lf/Up/Dn/Ft/Bk` as content strings, already in GL cube-map face order so the
+     * renderer can upload them straight into a cubemap: +X Right, -X Left, +Y Up, -Y Down,
+     * +Z Front(Ft), -Z Back(Bk).
+     */
+    String[] skyTextures = new String[6];
     boolean skyboxTextures;                             // a Sky with real SkyboxBk/Up/... assets
 
     // --- Atmosphere ---
@@ -160,14 +166,22 @@ final class EngineLighting {
         return l;
     }
 
+    private static final String[] SKY_KEYS = {"SkyboxRt", "SkyboxLf", "SkyboxUp", "SkyboxDn", "SkyboxFt", "SkyboxBk"};
+
     private static void readSky(EngineLighting l, Instance sky) {
         l.sky = true;
         l.celestialBodiesShown = bool(sky, "CelestialBodiesShown", l.celestialBodiesShown);
         l.sunAngularSize = Math.max(0, number(sky, "SunAngularSize", l.sunAngularSize));
         l.moonAngularSize = Math.max(0, number(sky, "MoonAngularSize", l.moonAngularSize));
         l.starCount = Math.max(0, number(sky, "StarCount", l.starCount));
-        Object up = sky.props.get("SkyboxUp");
-        l.skyboxTextures = up instanceof String && !((String) up).isEmpty();
+        boolean any = false;
+        for (int i = 0; i < 6; i++) {
+            Object raw = sky.props.get(SKY_KEYS[i]);
+            String content = raw instanceof String ? (String) raw : null;
+            l.skyTextures[i] = content == null || content.isEmpty() ? null : content;
+            any |= l.skyTextures[i] != null;
+        }
+        l.skyboxTextures = any;
     }
 
     private static void readAtmosphere(EngineLighting l, Instance a) {

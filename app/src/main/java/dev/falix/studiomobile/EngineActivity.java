@@ -28,14 +28,17 @@ public final class EngineActivity extends Activity {
     private final EngineScene scene = new EngineScene();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private EngineView viewport;
-    private LinearLayout explorerList, propertyList, toolPad, toolStrip;
+    private LinearLayout explorerList, propertyList, toolStrip;
+    private View explorerPanel, propertiesPanel, viewportBox, explorerSeparator, propertiesSeparator;
+    private boolean narrowScreen;
+    private int explorerWidth, propertiesWidth;
     private TextView title, subtitle, playLabel, explorerCount;
     private EditText explorerSearch;
     private FrameLayout viewportLayer;
     private TextView rendererError;
-    private JoystickView joystick;
+    private JoystickView joystick, liftPad;
     private View jumpButton;
-    private View playControls;
+    private View playControls, flyControls;
     private final HashSet<Instance> expanded = new HashSet<>();
     private final HashSet<Instance> collapsed = new HashSet<>();
 
@@ -55,6 +58,7 @@ public final class EngineActivity extends Activity {
     private int savedVersion;
     private String tool = "select";
     private double step = 0.5;
+    private boolean snap;
 
     /** Opens a place in the 3D editor. Managed project places also update their manifest hash on save. */
     static void launch(android.app.Activity from, Uri placeUri, String placeName, Uri projectFolder, String placeId) {
@@ -82,11 +86,10 @@ public final class EngineActivity extends Activity {
         placeId = intent.getStringExtra("placeId");
         autoPlay = intent.getBooleanExtra("play", false);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN);
-        getWindow().setStatusBarColor(dark ? 0xff15181e : 0xfff1f3f7);
-        getWindow().setNavigationBarColor(dark ? 0xff15181e : 0xfff1f3f7);
-        getWindow().getDecorView().setSystemUiVisibility(dark ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        enterFullscreen();
         try {
             setContentView(build());
+            applyCutoutPadding();
             load();
         } catch (Throwable failure) {
             // Constructing the editor must never take the whole app down: show the cause instead.
@@ -115,7 +118,46 @@ public final class EngineActivity extends Activity {
         setContentView(root);
     }
 
-    @Override protected void onResume() { super.onResume(); if (viewport != null) viewport.onResume(); }
+    /**
+     * The editor is a real full-screen workspace: the status and navigation bars are hidden and the
+     * sticky-immersive flags bring them back only for an explicit swipe, exactly like Studio's
+     * viewport taking the whole screen.
+     */
+    private void enterFullscreen() {
+        Window window = getWindow();
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        View decor = window.getDecorView();
+        decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        decor.setOnSystemUiVisibilityChangeListener(visibility -> {
+            if ((visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) decor.postDelayed(this::enterFullscreen, 1200);
+        });
+    }
+
+    /** Keeps the UI clear of a display cutout, which the hidden status bar no longer insets for. */
+    private void applyCutoutPadding() {
+        if (Build.VERSION.SDK_INT < 28) return;
+        View root = findViewById(android.R.id.content);
+        if (root == null) return;
+        try {
+            WindowInsets insets = root.getRootWindowInsets();
+            android.view.DisplayCutout cutout = insets == null ? null : insets.getDisplayCutout();
+            if (cutout == null) return;
+            root.setPadding(cutout.getSafeInsetLeft(), cutout.getSafeInsetTop(), cutout.getSafeInsetRight(), cutout.getSafeInsetBottom());
+        } catch (Throwable ignored) { }
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) { enterFullscreen(); applyCutoutPadding(); }
+    }
+
+    @Override protected void onResume() { super.onResume(); enterFullscreen(); if (viewport != null) viewport.onResume(); }
     @Override protected void onPause() { if (viewport != null) viewport.onPause(); super.onPause(); }
     @Override protected void onDestroy() { worker.shutdownNow(); super.onDestroy(); }
 
@@ -143,17 +185,42 @@ public final class EngineActivity extends Activity {
 
     // ------------------------------------------------------------------ layout
     private View build() {
+        // Phone-sized screens get the viewport first: the Explorer and Properties panels become
+        // toggles instead of columns, so nothing is squeezed into a few remaining pixels.
+        android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+        float density = metrics.density <= 0 ? 1 : metrics.density;
+        int widthDp = (int) (metrics.widthPixels / density);
+        narrowScreen = widthDp < 700;
+        explorerWidth = narrowScreen ? Math.min(dp(210), (int) (metrics.widthPixels * 0.36f)) : dp(226);
+        propertiesWidth = narrowScreen ? Math.min(dp(230), (int) (metrics.widthPixels * 0.40f)) : dp(258);
+
         LinearLayout root = col();
         root.setBackgroundColor(PANEL);
-        root.addView(buildTopBar(), lp(-1, 44));
+        root.addView(buildTopBar(), lp(-1, dp(48)));
         LinearLayout body = row();
         root.addView(body, lp(-1, 0, 1));
-        body.addView(buildExplorer(), lp(dp(196), -1));
-        body.addView(line(), lp(dp(1), -1));
-        body.addView(buildViewport(), lp(0, -1, 1));
-        body.addView(line(), lp(dp(1), -1));
-        body.addView(buildProperties(), lp(dp(228), -1));
+        explorerPanel = buildExplorer();
+        propertiesPanel = buildProperties();
+        body.addView(explorerPanel, lp(explorerWidth, -1));
+        explorerSeparator = line();
+        body.addView(explorerSeparator, lp(dp(1), -1));
+        viewportBox = buildViewport();
+        body.addView(viewportBox, lp(0, -1, 1));
+        propertiesSeparator = line();
+        body.addView(propertiesSeparator, lp(dp(1), -1));
+        body.addView(propertiesPanel, lp(propertiesWidth, -1));
+
+        boolean showExplorer = !narrowScreen;
+        explorerPanel.setVisibility(showExplorer ? View.VISIBLE : View.GONE);
+        propertiesPanel.setVisibility(showExplorer ? View.VISIBLE : View.GONE);
         return root;
+    }
+
+    /** Explorer/Properties are toggles so the viewport can take the whole screen on a phone. */
+    private void togglePanel(View panel, View separator) {
+        boolean show = panel.getVisibility() != View.VISIBLE;
+        panel.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (separator != null) separator.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
     private View buildTopBar() {
@@ -161,32 +228,44 @@ public final class EngineActivity extends Activity {
         bar.setBackgroundColor(PANEL2);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(6), 0, dp(6), 0);
-        bar.addView(iconButton("arrow", "Back", this::onBackPressed), lp(dp(36), dp(36)));
+        int button = dp(42);
+        bar.addView(iconButton("arrow", "Back", this::onBackPressed), lp(button, button));
         LinearLayout names = col();
-        names.setPadding(dp(8), 0, 0, 0);
+        names.setPadding(dp(8), 0, dp(4), 0);
         title = text(placeName, 13, true, TEXT);
+        title.setSingleLine(true);
+        title.setEllipsize(TextUtils.TruncateAt.END);
         subtitle = text("Loading place…", 10, false, MUTED);
+        subtitle.setSingleLine(true);
+        subtitle.setEllipsize(TextUtils.TruncateAt.END);
         names.addView(title);
         names.addView(subtitle);
         bar.addView(names, lp(0, -2, 1));
-        bar.addView(iconButton("search", "Search instances", () -> { if (explorerSearch != null) explorerSearch.requestFocus(); }), lp(dp(36), dp(36)));
-        bar.addView(iconButton("undo", "Undo", () -> { scene.undo(); afterEdit(); }), lp(dp(36), dp(36)));
-        bar.addView(iconButton("redo", "Redo", () -> { scene.redo(); afterEdit(); }), lp(dp(36), dp(36)));
-        bar.addView(line(), lp(dp(1), dp(20)));
+        // Panels are toggles: on a phone the viewport gets the whole width until you ask for one.
+        bar.addView(iconButton("layers", "Explorer panel", () -> togglePanel(explorerPanel, explorerSeparator)), lp(button, button));
+        bar.addView(iconButton("list", "Properties panel", () -> togglePanel(propertiesPanel, propertiesSeparator)), lp(button, button));
+        if (!narrowScreen) {
+            bar.addView(iconButton("undo", "Undo", this::undo), lp(button, button));
+            bar.addView(iconButton("redo", "Redo", this::redo), lp(button, button));
+        }
         LinearLayout playButton = row();
         playButton.setGravity(Gravity.CENTER_VERTICAL);
-        playButton.setPadding(dp(10), 0, dp(10), 0);
+        playButton.setPadding(dp(narrowScreen ? 8 : 12), 0, dp(narrowScreen ? 8 : 12), 0);
         playButton.setBackground(shape(SOFT, 8));
         playLabel = text("Play", 12, true, ACCENT);
         StudioIcon playIcon = new StudioIcon(this, "play", ACCENT);
-        playButton.addView(playIcon, lp(dp(14), dp(14)));
-        playButton.addView(playLabel, margin(8, 0, -2, -2));
+        playButton.addView(playIcon, lp(dp(15), dp(15)));
+        if (!narrowScreen) playButton.addView(playLabel, margin(8, 0, -2, -2));
         playButton.setOnClickListener(v -> { if (scene.playing) stopPlay(); else startPlay(); });
-        bar.addView(playButton, lp(-2, dp(30)));
-        bar.addView(iconButton("save", "Save place", () -> save(true)), lp(dp(36), dp(36)));
-        bar.addView(iconButton("more", "More actions", () -> moreMenu(bar)), lp(dp(36), dp(36)));
+        bar.addView(playButton, lp(-2, dp(34)));
+        bar.addView(iconButton("save", "Save place", () -> save(true)), lp(button, button));
+        bar.addView(iconButton("more", "More actions", () -> moreMenu(bar)), lp(button, button));
         return bar;
     }
+
+    private void undo() { scene.undo(); afterEdit(); }
+
+    private void redo() { scene.redo(); afterEdit(); }
 
     private View buildExplorer() {
         LinearLayout panel = col();
@@ -241,27 +320,30 @@ public final class EngineActivity extends Activity {
         viewportLayer.addView(viewport, new FrameLayout.LayoutParams(-1, -1));
 
         toolStrip = row();
-        toolStrip.setPadding(dp(4), dp(2), dp(4), dp(2));
+        toolStrip.setPadding(dp(4), dp(3), dp(4), dp(3));
         toolStrip.setBackground(shape(0xcc23272f, 8));
-        toolStrip.addView(toolButton("select", "arrow", "Select"), lp(dp(30), dp(30)));
-        toolStrip.addView(toolButton("move", "move", "Move"), lp(dp(30), dp(30)));
-        toolStrip.addView(toolButton("rotate", "rotate", "Rotate"), lp(dp(30), dp(30)));
-        toolStrip.addView(toolButton("scale", "scale", "Scale"), lp(dp(30), dp(30)));
-        toolStrip.addView(toolButton("insert", "cube", "Insert"), lp(dp(30), dp(30)));
-        toolStrip.addView(toolButton("duplicate", "copy", "Duplicate"), lp(dp(30), dp(30)));
-        toolStrip.addView(toolButton("delete", "trash", "Delete"), lp(dp(30), dp(30)));
-        toolStrip.addView(toolButton("focus", "search", "Focus selection"), lp(dp(30), dp(30)));
+        int toolSize = dp(40);
+        toolStrip.addView(toolButton("select", "arrow", "Select"), lp(toolSize, toolSize));
+        toolStrip.addView(toolButton("move", "move", "Move tool"), lp(toolSize, toolSize));
+        toolStrip.addView(toolButton("rotate", "rotate", "Rotate tool"), lp(toolSize, toolSize));
+        toolStrip.addView(toolButton("scale", "scale", "Scale tool"), lp(toolSize, toolSize));
+        toolStrip.addView(toolButton("grab", "hand", "Grab tool: drag parts to move them"), lp(toolSize, toolSize));
+        toolStrip.addView(toolButton("snap", "grid", "Grid snapping"), lp(toolSize, toolSize));
+        toolStrip.addView(line(), margin(dp(3), dp(6), dp(1), dp(26)));
+        toolStrip.addView(toolButton("insert", "cube", "Insert object"), lp(toolSize, toolSize));
+        toolStrip.addView(toolButton("duplicate", "copy", "Duplicate"), lp(toolSize, toolSize));
+        toolStrip.addView(toolButton("delete", "trash", "Delete"), lp(toolSize, toolSize));
+        toolStrip.addView(toolButton("focus", "search", "Focus selection"), lp(toolSize, toolSize));
+        // The strip scrolls instead of shrinking, so no button is ever squeezed on a phone.
+        HorizontalScrollView toolScroll = new HorizontalScrollView(this);
+        toolScroll.setHorizontalScrollBarEnabled(false);
+        toolScroll.setClipToPadding(false);
+        toolScroll.addView(toolStrip, new FrameLayout.LayoutParams(-2, -2));
         FrameLayout.LayoutParams toolParams = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
-        toolParams.setMargins(dp(8), dp(8), 0, 0);
-        viewportLayer.addView(toolStrip, toolParams);
+        toolParams.setMargins(dp(8), dp(8), dp(8), 0);
+        viewportLayer.addView(toolScroll, toolParams);
 
-        toolPad = col();
-        toolPad.setPadding(dp(6), dp(6), dp(6), dp(6));
-        toolPad.setBackground(shape(0xcc23272f, 10));
-        toolPad.setVisibility(View.GONE);
-        FrameLayout.LayoutParams padParams = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.LEFT);
-        padParams.setMargins(dp(8), 0, 0, dp(8));
-        viewportLayer.addView(toolPad, padParams);
+        viewportLayer.addView(buildFlyControls(), new FrameLayout.LayoutParams(-1, -1));
 
         playControls = buildPlayControls();
         playControls.setVisibility(View.GONE);
@@ -284,13 +366,34 @@ public final class EngineActivity extends Activity {
         rendererError.setVisibility(View.VISIBLE);
     }
 
+/**
+     * Fly controls for the editor camera, Studio's WASD/QE replacement: the left stick flies along
+     * the direction the camera looks (so looking up and pushing forward climbs) and the small pad
+     * beside it climbs or descends without changing where you look. The same stick walks the
+     * character in play mode.
+     */
+    private View buildFlyControls() {
+        LinearLayout layer = row();
+        joystick = new JoystickView(this);
+        joystick.setContentDescription("Fly the editor camera");
+        joystick.setListener((x, y) -> {
+            if (scene.playing) { scene.moveX = x; scene.moveZ = y; }
+            else { scene.flyX = x; scene.flyZ = y; }
+        });
+        layer.addView(joystick, lp(dp(128), dp(128)));
+        liftPad = new JoystickView(this);
+        liftPad.setContentDescription("Camera up and down");
+        liftPad.setListener((x, y) -> { if (!scene.playing) scene.flyUp = y; });
+        layer.addView(liftPad, margin(dp(10), 0, dp(58), dp(128)));
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.LEFT);
+        params.setMargins(dp(14), 0, 0, dp(14));
+        layer.setLayoutParams(params);
+        flyControls = layer;
+        return layer;
+    }
+
     private View buildPlayControls() {
         FrameLayout layer = new FrameLayout(this);
-        joystick = new JoystickView(this);
-        joystick.setListener((x, y) -> { scene.moveX = x; scene.moveZ = y; });
-        FrameLayout.LayoutParams joy = new FrameLayout.LayoutParams(dp(128), dp(128), Gravity.BOTTOM | Gravity.LEFT);
-        joy.setMargins(dp(14), 0, 0, dp(14));
-        layer.addView(joystick, joy);
         jumpButton = roundButton("JUMP", () -> { scene.jumpQueued = true; viewport.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); });
         FrameLayout.LayoutParams jump = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.RIGHT);
         jump.setMargins(0, 0, dp(20), dp(20));
@@ -376,7 +479,6 @@ public final class EngineActivity extends Activity {
         loadError = message;
         subtitle.setText("Could not open this place");
         propertyList.removeAllViews();
-        toolPad.setVisibility(View.GONE);
         LinearLayout cardView = col();
         cardView.setPadding(dp(14), dp(14), dp(14), dp(14));
         cardView.setBackground(shape(CANVAS, 10));
@@ -429,7 +531,7 @@ public final class EngineActivity extends Activity {
     private View treeRow(Instance node, int depth, String query) {
         LinearLayout row = row();
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(4 + depth * 12), 0, dp(6), 0);
+        row.setPadding(dp(4 + depth * 14), 0, dp(6), 0);
         boolean selected = node == scene.selection;
         row.setBackground(selected ? shape(SOFT, 6) : null);
         if (!node.children.isEmpty()) {
@@ -438,11 +540,11 @@ public final class EngineActivity extends Activity {
                 if (open) { collapsed.add(node); expanded.remove(node); } else { expanded.add(node); collapsed.remove(node); }
                 buildTree();
             });
-            row.addView(chevron, lp(dp(18), dp(18)));
+            row.addView(chevron, lp(dp(24), dp(30)));
         } else {
-            row.addView(new View(this), lp(dp(18), dp(1)));
+            row.addView(new View(this), lp(dp(24), dp(1)));
         }
-        row.addView(new StudioIcon(this, iconFor(node), selected ? ACCENT : MUTED), lp(dp(14), dp(14)));
+        row.addView(new StudioIcon(this, iconFor(node), selected ? ACCENT : MUTED), lp(dp(15), dp(15)));
         LinearLayout words = row();
         words.setGravity(Gravity.CENTER_VERTICAL);
         TextView namePart = text(node.name, 11.5f, selected, selected ? ACCENT : TEXT);
@@ -458,7 +560,7 @@ public final class EngineActivity extends Activity {
         row.addView(words, margin(dp(7), 0, 0, -2, 1));
         row.setOnClickListener(v -> { scene.selection = node; refresh(); });
         row.setOnLongClickListener(v -> { nodeMenu(v, node); return true; });
-        LinearLayout.LayoutParams params = lp(-1, dp(26));
+        LinearLayout.LayoutParams params = lp(-1, dp(30));
         row.setLayoutParams(params);
         return row;
     }
@@ -483,6 +585,7 @@ public final class EngineActivity extends Activity {
         PopupMenu menu = new PopupMenu(this, anchor);
         menu.getMenu().add("Rename");
         menu.getMenu().add("Duplicate");
+        menu.getMenu().add("Group in Folder");
         menu.getMenu().add("Focus");
         if (!node.isService()) menu.getMenu().add("Delete");
         if (node.isRenderable()) { menu.getMenu().add("Anchor / Unanchor"); menu.getMenu().add("CanCollide on/off"); }
@@ -490,6 +593,7 @@ public final class EngineActivity extends Activity {
             String label = item.getTitle().toString();
             if (label.equals("Rename")) { renameDialog(node); return true; }
             if (label.equals("Duplicate")) { scene.selection = node; scene.duplicateSelection(); afterEdit(); return true; }
+            if (label.equals("Group in Folder")) { groupInFolder(node); return true; }
             if (label.equals("Focus")) { scene.selection = node; scene.focus(node); refresh(); return true; }
             if (label.equals("Delete")) { scene.selection = node; scene.deleteSelection(); afterEdit(); return true; }
             if (label.equals("Anchor / Unanchor")) { scene.selection = node; scene.setProperty(node, "Anchored", !node.getBool("Anchored", false)); afterEdit(); return true; }
@@ -497,6 +601,23 @@ public final class EngineActivity extends Activity {
             return false;
         });
         menu.show();
+    }
+
+    /** Studio's "Group selection": one Folder holds the instance so the tree stays tidy. */
+    private void groupInFolder(Instance node) {
+        if (node == null || node.parent == null || node.isService()) return;
+        scene.pushUndo();
+        Instance parent = node.parent;
+        String name = "Folder";
+        int n = 1;
+        while (parent.childNamed(name) != null) name = "Folder " + (++n);
+        Instance folder = new Instance("Folder", name);
+        parent.add(folder);
+        folder.add(node);
+        scene.selection = folder;
+        expanded.add(folder);
+        scene.markDirty();
+        afterEdit();
     }
 
     private void renameDialog(Instance node) {
@@ -563,10 +684,244 @@ public final class EngineActivity extends Activity {
             propertyList.addView(checkRow("CanCollide", node.getBool("CanCollide", true), checked -> { scene.setProperty(node, "CanCollide", checked); afterEdit(); }));
             if (node.className.equals("SpawnLocation")) propertyList.addView(checkRow("Enabled", node.getBool("Enabled", true), checked -> { scene.setProperty(node, "Enabled", checked); afterEdit(); }));
         }
+        fillClassProperties(node);
         propertyList.addView(sectionLabel("Instance"));
         propertyList.addView(readonlyRow("Class", node.className));
         propertyList.addView(readonlyRow("Children", String.valueOf(node.children.size())));
         for (String warning : scene.unmodeledWarnings) propertyList.addView(hintText(warning));
+    }
+
+    /**
+     * Per-class properties, mirroring Studio's panel: the Lighting service and everything it owns,
+     * lights, the six BasePart surface types that pick the texture each face shows, streamed asset
+     * slots and the SpawnLocation behaviour flags.
+     */
+    private void fillClassProperties(Instance node) {
+        switch (node.className) {
+            case "Lighting": lightingRows(node); break;
+            case "Sky": skyRows(node); break;
+            case "Atmosphere": atmosphereRows(node); break;
+            case "Clouds": cloudsRows(node); break;
+            case "PointLight": case "SpotLight": case "SurfaceLight": lightRows(node); break;
+            case "Decal": case "Texture": textureRows(node); break;
+            case "SurfaceAppearance": surfaceAppearanceRows(node); break;
+            case "MeshPart": meshRows(node); break;
+            default: break;
+        }
+        if (node.isRenderable()) basePartRows(node);
+        if (node == scene.workspace) workspaceRows(node);
+    }
+
+    /** Enum.Material plus the per-face SurfaceType pickers that drive the viewport textures. */
+    private void basePartRows(Instance node) {
+        propertyList.addView(sectionLabel("Surfaces"));
+        propertyList.addView(hintText("Each face shows its SurfaceType texture, or the Material texture when the surface is Smooth. Spawn pads keep their pad texture on top."));
+        final String[] keys = {"RightSurface", "TopSurface", "BackSurface", "LeftSurface", "BottomSurface", "FrontSurface"};
+        final String[] faces = {"Right (+X)", "Top (+Y)", "Back (+Z)", "Left (-X)", "Bottom (-Y)", "Front (-Z)"};
+        for (int i = 0; i < keys.length; i++) {
+            final String key = keys[i];
+            final String faceName = faces[i];
+            final int value = Math.max(0, Math.min(8, node.getInt(key, 0)));
+            propertyList.addView(pickerRow(faceName, EngineTextures.SURFACE_TILES[value], () -> enumDialog("SurfaceType " + faceName, EngineTextures.SURFACE_TILES, value, chosen -> {
+                scene.setProperty(node, key, chosen);
+                afterEdit();
+            })));
+        }
+        propertyList.addView(sectionLabel("Part"));
+        propertyList.addView(pickerRow("Shape", PART_SHAPES[Math.max(0, Math.min(2, node.getInt("Shape", 1)))], () -> enumDialog("Part shape", PART_SHAPES, node.getInt("Shape", 1), chosen -> {
+            scene.setProperty(node, "Shape", chosen);
+            afterEdit();
+        })));
+        propertyList.addView(sliderRow("Reflectance", node.getNumber("Reflectance", 0), value -> { scene.setProperty(node, "Reflectance", value); afterEdit(); }));
+        propertyList.addView(checkRow("CastShadow", node.getBool("CastShadow", true), checked -> { scene.setProperty(node, "CastShadow", checked); afterEdit(); }));
+    }
+
+    private static final String[] PART_SHAPES = {"Ball", "Block", "Cylinder"};
+
+    private void workspaceRows(Instance node) {
+        propertyList.addView(sectionLabel("Workspace"));
+        propertyList.addView(numberRow("Gravity", node.getNumber("Gravity", 196.2), value -> { scene.setProperty(node, "Gravity", value); scene.grav(); afterEdit(); }));
+        propertyList.addView(checkRow("StreamingEnabled", node.getBool("StreamingEnabled", false), checked -> { scene.setProperty(node, "StreamingEnabled", checked); afterEdit(); }));
+        propertyList.addView(checkRow("FilteringEnabled", node.getBool("FilteringEnabled", true), checked -> { scene.setProperty(node, "FilteringEnabled", checked); afterEdit(); }));
+    }
+
+    private void lightingRows(Instance node) {
+        propertyList.addView(sectionLabel("Lighting · time"));
+        final double clock = node.getNumber("ClockTime", 14);
+        LinearLayout clockBox = col();
+        clockBox.setPadding(0, dp(3), 0, dp(3));
+        LinearLayout clockTop = row();
+        clockTop.addView(text("ClockTime", 10, false, MUTED), lp(0, -2, 1));
+        final TextView clockRead = text(timeLabel(clock), 10, true, TEXT);
+        clockTop.addView(clockRead);
+        clockBox.addView(clockTop, lp(-1, -2));
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(2400);
+        bar.setProgress((int) Math.round(clock * 100));
+        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+        bar.setThumbTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) { clockRead.setText(timeLabel(progress / 100.0)); }
+            public void onStartTrackingTouch(SeekBar seekBar) { }
+            public void onStopTrackingTouch(SeekBar seekBar) { setClockTime(seekBar.getProgress() / 100.0); }
+        });
+        clockBox.addView(bar, lp(-1, dp(30)));
+        propertyList.addView(clockBox);
+        propertyList.addView(numberRow("GeographicLatitude", node.getNumber("GeographicLatitude", 41.7333), value -> { scene.setProperty(node, "GeographicLatitude", value); afterEdit(); }));
+        propertyList.addView(numberRow("Brightness", node.getNumber("Brightness", 2), value -> { scene.setProperty(node, "Brightness", value); afterEdit(); }));
+        propertyList.addView(numberRow("ExposureCompensation", node.getNumber("ExposureCompensation", 0), value -> { scene.setProperty(node, "ExposureCompensation", value); afterEdit(); }));
+
+        propertyList.addView(sectionLabel("Lighting · colour"));
+        propertyList.addView(colorRow("Ambient", colourOf(node, "Ambient", 0x000000), value -> { scene.setProperty(node, "Ambient", rgb(value)); afterEdit(); }));
+        propertyList.addView(colorRow("OutdoorAmbient", colourOf(node, "OutdoorAmbient", 0x7F7F7F), value -> { scene.setProperty(node, "OutdoorAmbient", rgb(value)); afterEdit(); }));
+        propertyList.addView(colorRow("ColorShift_Top", colourOf(node, "ColorShift_Top", 0x000000), value -> { scene.setProperty(node, "ColorShift_Top", rgb(value)); afterEdit(); }));
+        propertyList.addView(colorRow("ColorShift_Bottom", colourOf(node, "ColorShift_Bottom", 0x000000), value -> { scene.setProperty(node, "ColorShift_Bottom", rgb(value)); afterEdit(); }));
+        propertyList.addView(colorRow("FogColor", colourOf(node, "FogColor", 0xBFC0C3), value -> { scene.setProperty(node, "FogColor", rgb(value)); afterEdit(); }));
+
+        propertyList.addView(sectionLabel("Lighting · environment"));
+        propertyList.addView(sliderRow("EnvironmentDiffuseScale", node.getNumber("EnvironmentDiffuseScale", 0), value -> { scene.setProperty(node, "EnvironmentDiffuseScale", value); afterEdit(); }));
+        propertyList.addView(sliderRow("EnvironmentSpecularScale", node.getNumber("EnvironmentSpecularScale", 1), value -> { scene.setProperty(node, "EnvironmentSpecularScale", value); afterEdit(); }));
+        propertyList.addView(numberRow("FogStart", node.getNumber("FogStart", 0), value -> { scene.setProperty(node, "FogStart", value); afterEdit(); }));
+        propertyList.addView(numberRow("FogEnd", node.getNumber("FogEnd", 100000), value -> { scene.setProperty(node, "FogEnd", value); afterEdit(); }));
+        propertyList.addView(checkRow("GlobalShadows", node.getBool("GlobalShadows", true), checked -> { scene.setProperty(node, "GlobalShadows", checked); afterEdit(); }));
+        propertyList.addView(sliderRow("ShadowSoftness", node.getNumber("ShadowSoftness", 0.2), value -> { scene.setProperty(node, "ShadowSoftness", value); afterEdit(); }));
+        propertyList.addView(pickerRow("Technology", node.getString("Technology", "Voxel"), () -> enumDialog("Technology", TECHNOLOGIES, indexOf(TECHNOLOGIES, node.getString("Technology", "Voxel")), chosen -> {
+            scene.setProperty(node, "Technology", TECHNOLOGIES[(int) chosen]);
+            afterEdit();
+        })));
+        propertyList.addView(pickerRow("LightingStyle", node.getString("LightingStyle", "Soft"), () -> enumDialog("LightingStyle", LIGHTING_STYLES, indexOf(LIGHTING_STYLES, node.getString("LightingStyle", "Soft")), chosen -> {
+            scene.setProperty(node, "LightingStyle", LIGHTING_STYLES[(int) chosen]);
+            afterEdit();
+        })));
+    }
+
+    private static final String[] TECHNOLOGIES = {"Voxel", "ShadowMap", "Future", "Compatibility", "Legacy"};
+    private static final String[] LIGHTING_STYLES = {"Soft", "Realistic", "Colorful", "SoftShadows"};
+
+    /** ClockTime and TimeOfDay are two views of one value in Roblox; keep them in step. */
+    private void setClockTime(double hours) {
+        Instance lighting = scene.root == null ? null : scene.root.findFirst("Lighting");
+        if (lighting == null) return;
+        double value = Math.max(0, Math.min(24, hours));
+        scene.setProperty(lighting, "ClockTime", value);
+        scene.setProperty(lighting, "TimeOfDay", timeLabel(value));
+        afterEdit();
+    }
+
+    private static String timeLabel(double hours) {
+        int total = (int) Math.round(Math.max(0, Math.min(24, hours)) * 60);
+        return String.format(Locale.US, "%02d:%02d:00", (total / 60) % 24, total % 60);
+    }
+
+    private void skyRows(Instance node) {
+        propertyList.addView(sectionLabel("Sky"));
+        propertyList.addView(checkRow("CelestialBodiesShown", node.getBool("CelestialBodiesShown", true), checked -> { scene.setProperty(node, "CelestialBodiesShown", checked); afterEdit(); }));
+        propertyList.addView(numberRow("SunAngularSize", node.getNumber("SunAngularSize", 21), value -> { scene.setProperty(node, "SunAngularSize", value); afterEdit(); }));
+        propertyList.addView(numberRow("MoonAngularSize", node.getNumber("MoonAngularSize", 11), value -> { scene.setProperty(node, "MoonAngularSize", value); afterEdit(); }));
+        propertyList.addView(numberRow("StarCount", node.getNumber("StarCount", 3000), value -> { scene.setProperty(node, "StarCount", value); afterEdit(); }));
+        propertyList.addView(sectionLabel("Skybox textures"));
+        propertyList.addView(hintText("rbxassetid:// ids are streamed and applied as a real cubemap once all six faces load. Leave them empty for the procedural Roblox-style sky."));
+        String[] keys = {"SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp"};
+        for (final String key : keys) propertyList.addView(textRow(key, node.getString(key, ""), value -> { scene.setProperty(node, key, value.trim()); afterEdit(); }));
+    }
+
+    private void atmosphereRows(Instance node) {
+        propertyList.addView(sectionLabel("Atmosphere"));
+        propertyList.addView(sliderRow("Density", node.getNumber("Density", 0.3), value -> { scene.setProperty(node, "Density", value); afterEdit(); }));
+        propertyList.addView(sliderRow("Offset", node.getNumber("Offset", 0), value -> { scene.setProperty(node, "Offset", value); afterEdit(); }));
+        propertyList.addView(sliderRow("Decay", node.getNumber("Decay", 0.4), value -> { scene.setProperty(node, "Decay", value); afterEdit(); }));
+        propertyList.addView(numberRow("Glare", node.getNumber("Glare", 0), value -> { scene.setProperty(node, "Glare", value); afterEdit(); }));
+        propertyList.addView(numberRow("Haze", node.getNumber("Haze", 0), value -> { scene.setProperty(node, "Haze", value); afterEdit(); }));
+        propertyList.addView(colorRow("Color", colourOf(node, "Color", 0xC7C7C7), value -> { scene.setProperty(node, "Color", rgb(value)); afterEdit(); }));
+    }
+
+    private void cloudsRows(Instance node) {
+        propertyList.addView(sectionLabel("Clouds"));
+        propertyList.addView(sliderRow("Cover", node.getNumber("Cover", 0.6), value -> { scene.setProperty(node, "Cover", value); afterEdit(); }));
+        propertyList.addView(sliderRow("Density", node.getNumber("Density", 0.7), value -> { scene.setProperty(node, "Density", value); afterEdit(); }));
+        propertyList.addView(colorRow("Color", colourOf(node, "Color", 0xFFFFFF), value -> { scene.setProperty(node, "Color", rgb(value)); afterEdit(); }));
+    }
+
+    private void lightRows(Instance node) {
+        propertyList.addView(sectionLabel(node.className));
+        propertyList.addView(numberRow("Brightness", node.getNumber("Brightness", 1), value -> { scene.setProperty(node, "Brightness", value); afterEdit(); }));
+        propertyList.addView(numberRow("Range", node.getNumber("Range", 8), value -> { scene.setProperty(node, "Range", value); afterEdit(); }));
+        if (node.className.equals("SpotLight")) propertyList.addView(numberRow("Angle", node.getNumber("Angle", 90), value -> { scene.setProperty(node, "Angle", value); afterEdit(); }));
+        if (!node.className.equals("PointLight")) propertyList.addView(pickerRow("Face", NORMAL_IDS[Math.max(0, Math.min(5, node.getInt("Face", 5)))], () -> enumDialog("Face", NORMAL_IDS, node.getInt("Face", 5), chosen -> {
+            scene.setProperty(node, "Face", chosen);
+            afterEdit();
+        })));
+        propertyList.addView(colorRow("Color", colourOf(node, "Color", 0xFFFFFF), value -> { scene.setProperty(node, "Color", rgb(value)); afterEdit(); }));
+        propertyList.addView(checkRow("Enabled", node.getBool("Enabled", true), checked -> { scene.setProperty(node, "Enabled", checked); afterEdit(); }));
+    }
+
+    private static final String[] NORMAL_IDS = {"Right", "Top", "Back", "Left", "Bottom", "Front"};
+
+    private void textureRows(Instance node) {
+        propertyList.addView(sectionLabel(node.className));
+        propertyList.addView(textRow("Texture", node.getString(node.className.equals("Decal") ? "Texture" : "Texture", ""), value -> { scene.setProperty(node, "Texture", value.trim()); afterEdit(); }));
+        propertyList.addView(pickerRow("Face", NORMAL_IDS[Math.max(0, Math.min(5, node.getInt("Face", 5)))], () -> enumDialog("Face", NORMAL_IDS, node.getInt("Face", 5), chosen -> {
+            scene.setProperty(node, "Face", chosen);
+            afterEdit();
+        })));
+        propertyList.addView(numberRow("StudsPerTileU", node.getNumber("StudsPerTileU", 1), value -> { scene.setProperty(node, "StudsPerTileU", value); afterEdit(); }));
+        propertyList.addView(numberRow("StudsPerTileV", node.getNumber("StudsPerTileV", 1), value -> { scene.setProperty(node, "StudsPerTileV", value); afterEdit(); }));
+        propertyList.addView(hintText("The image is streamed from Roblox with the class id in the path, then tiled across the face the way Roblox tiles it."));
+    }
+
+    private void surfaceAppearanceRows(Instance node) {
+        propertyList.addView(sectionLabel("SurfaceAppearance"));
+        String[] keys = {"ColorMap", "RoughnessMap", "MetalnessMap", "NormalMap", "EmissiveMask"};
+        for (final String key : keys) propertyList.addView(textRow(key, node.getString(key, ""), value -> { scene.setProperty(node, key, value.trim()); afterEdit(); }));
+        propertyList.addView(pickerRow("AlphaMode", ALPHA_MODES[Math.max(0, Math.min(3, node.getInt("AlphaMode", 0)))], () -> enumDialog("AlphaMode", ALPHA_MODES, node.getInt("AlphaMode", 0), chosen -> {
+            scene.setProperty(node, "AlphaMode", chosen);
+            afterEdit();
+        })));
+        propertyList.addView(hintText("ColorMap is streamed and layered over the material; the other maps are kept for round-trip editing."));
+    }
+
+    private static final String[] ALPHA_MODES = {"Overlay", "Transparency", "TintMask", "Opaque"};
+
+    private void meshRows(Instance node) {
+        propertyList.addView(sectionLabel("MeshPart"));
+        propertyList.addView(readonlyRow("MeshId", node.getString("MeshId", node.getString("MeshID", ""))));
+        propertyList.addView(textRow("TextureID", node.getString("TextureID", node.getString("TextureId", "")), value -> { scene.setProperty(node, "TextureID", value.trim()); afterEdit(); }));
+        propertyList.addView(readonlyRow("DoubleSided", String.valueOf(node.getBool("DoubleSided", false))));
+        propertyList.addView(hintText("Meshes render as their bounding box in this build; the texture id is streamed like a Texture object."));
+    }
+
+    /** Colour rows store Roblox Color3 values, so the INT3 tuple and the uint8 form both stay valid. */
+    private int colourOf(Instance node, String key, int fallback) {
+        Object value = node.props.get(key);
+        if (value instanceof Instance.Vector3) {
+            Instance.Vector3 v = (Instance.Vector3) value;
+            return (clampByte(v.x) << 16) | (clampByte(v.y) << 8) | clampByte(v.z);
+        }
+        if (value instanceof Number) return ((Number) value).intValue() & 0xFFFFFF;
+        return fallback;
+    }
+
+    private static int clampByte(double v) {
+        int x = (int) Math.round(v * 255);
+        return x < 0 ? 0 : Math.min(255, x);
+    }
+
+    private static Instance.Vector3 rgb(int colour) {
+        return new Instance.Vector3(((colour >> 16) & 0xFF) / 255.0, ((colour >> 8) & 0xFF) / 255.0, (colour & 0xFF) / 255.0);
+    }
+
+    private static int indexOf(String[] values, String value) {
+        for (int i = 0; i < values.length; i++) if (values[i].equalsIgnoreCase(value)) return i;
+        return 0;
+    }
+
+    /** Simple enum picker: the index of the chosen row is the Enum value Roblox stores. */
+    private void enumDialog(String title, String[] names, int current, CommitNumber commit) {
+        new AlertDialog.Builder(this).setTitle(title)
+                .setSingleChoiceItems(names, Math.max(0, Math.min(names.length - 1, current)), (dialog, which) -> {
+                    commit.set(which);
+                    dialog.dismiss();
+                }).show();
     }
 
     private interface CommitText { void set(String value); }
@@ -643,11 +998,13 @@ public final class EngineActivity extends Activity {
         return box;
     }
 
-    private View colorRow(int color, CommitColor commit) {
+    private View colorRow(int color, CommitColor commit) { return colorRow("Color", color, commit); }
+
+    private View colorRow(String label, int color, CommitColor commit) {
         LinearLayout box = row();
         box.setGravity(Gravity.CENTER_VERTICAL);
         box.setPadding(0, dp(3), 0, dp(3));
-        box.addView(text("Color", 10, false, MUTED), lp(0, -2, 1));
+        box.addView(text(label, 10, false, MUTED), lp(0, -2, 1));
         View swatch = new View(this);
         swatch.setBackground(shape(0xff000000 | color, 5));
         swatch.setContentDescription("Pick color");
@@ -786,91 +1143,150 @@ public final class EngineActivity extends Activity {
             case "duplicate": scene.duplicateSelection(); afterEdit(); return;
             case "delete": scene.deleteSelection(); afterEdit(); return;
             case "focus": if (scene.selection != null) { scene.focus(scene.selection); refresh(); } return;
-            default: tool = id; buildToolPad(); refreshViewportTools(); return;
+            case "snap": snapMenu(); return;
+            default: tool = id; scene.gizmoTool = gizmoToolFor(id); refreshViewportTools(); return;
         }
+    }
+
+    /** Maps a tool button to the handle set the viewport draws and responds to. */
+    private static int gizmoToolFor(String id) {
+        switch (id) {
+            case "move": return EngineGizmo.MOVE;
+            case "rotate": return EngineGizmo.ROTATE;
+            case "scale": return EngineGizmo.SCALE;
+            case "grab": return EngineGizmo.GRAB;
+            default: return EngineGizmo.MOVE;
+        }
+    }
+
+    /** Grid snapping, in studs, applied by the transform handles while dragging. */
+    private void snapMenu() {
+        final double[] values = {0, 1, 0.5, 0.25};
+        final String[] labels = {"Off", "1 stud", "0.5 studs", "0.25 studs"};
+        new AlertDialog.Builder(this).setTitle("Grid snapping")
+                .setItems(labels, (d, which) -> {
+                    snap = values[which] > 0;
+                    scene.gridSnap = values[which];
+                    step = values[which] > 0 ? values[which] : 0.5;
+                    refreshViewportTools();
+                }).show();
     }
 
     private void refreshViewportTools() {
         if (toolStrip != null) {
             LinearLayout strip = toolStrip;
-            String[] ids = {"select", "move", "rotate", "scale", "insert", "duplicate", "delete", "focus"};
-            String[] icons = {"arrow", "move", "rotate", "scale", "cube", "copy", "trash", "search"};
-            String[] descriptions = {"Select", "Move", "Rotate", "Scale", "Insert", "Duplicate", "Delete", "Focus selection"};
+            String[] ids = {"select", "move", "rotate", "scale", "grab", "snap", null, "insert", "duplicate", "delete", "focus"};
+            String[] icons = {"arrow", "move", "rotate", "scale", "hand", "grid", null, "cube", "copy", "trash", "search"};
+            String[] descriptions = {"Select", "Move tool", "Rotate tool", "Scale tool", "Grab tool", "Grid snapping", null, "Insert object", "Duplicate", "Delete", "Focus selection"};
             for (int i = 0; i < strip.getChildCount() && i < ids.length; i++) {
                 View child = strip.getChildAt(i);
-                if (!(child instanceof FrameLayout)) continue;
-                boolean active = tool.equals(ids[i]);
+                if (!(child instanceof FrameLayout) || ids[i] == null) continue;
+                boolean active = ids[i].equals("snap") ? snap : tool.equals(ids[i]);
                 child.setBackground(active ? shape(ACCENT, 6) : shape(0x00000000, 6));
                 ((FrameLayout) child).removeAllViews();
-                ((FrameLayout) child).addView(new StudioIcon(this, icons[i], active ? 0xffffffff : 0xffd0d6e0), new FrameLayout.LayoutParams(dp(15), dp(15), Gravity.CENTER));
+                ((FrameLayout) child).addView(new StudioIcon(this, icons[i], active ? 0xffffffff : 0xffd0d6e0), new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER));
+                ((FrameLayout) child).setContentDescription(descriptions[i]);
                 final String id = ids[i];
                 child.setOnClickListener(v -> toolAction(id));
             }
         }
     }
 
-    private void buildToolPad() {
-        toolPad.removeAllViews();
-        if (tool.equals("select")) { toolPad.setVisibility(View.GONE); return; }
-        toolPad.setVisibility(View.VISIBLE);
-        if (tool.equals("move") || tool.equals("scale")) {
-            boolean scale = tool.equals("scale");
-            TextView label = text(scale ? "Scale 10%" : "Move " + step + " studs", 10, true, 0xffffffff);
-            label.setPadding(dp(4), 0, dp(4), dp(4));
-            toolPad.addView(label);
-            LinearLayout line1 = row();
-            line1.addView(padButton("Y+", () -> padAction(1, 1, scale)), lp(dp(40), dp(28)));
-            line1.addView(padButton("Y-", () -> padAction(1, -1, scale)), margin(dp(4), 0, dp(40), dp(28)));
-            toolPad.addView(line1, lp(-2, dp(28)));
-            LinearLayout line2 = row();
-            line2.addView(padButton("X-", () -> padAction(0, -1, scale)), lp(dp(40), dp(28)));
-            line2.addView(padButton("X+", () -> padAction(0, 1, scale)), margin(dp(4), 0, dp(40), dp(28)));
-            line2.addView(padButton("Z-", () -> padAction(2, -1, scale)), margin(dp(4), 0, dp(40), dp(28)));
-            line2.addView(padButton("Z+", () -> padAction(2, 1, scale)), margin(dp(4), 0, dp(40), dp(28)));
-            toolPad.addView(line2, lp(-2, dp(28)));
-            if (!scale) {
-                LinearLayout line3 = row();
-                line3.addView(padButton("0.5", () -> { step = 0.5; buildToolPad(); }), lp(dp(40), dp(24)));
-                line3.addView(padButton("1", () -> { step = 1; buildToolPad(); }), margin(dp(4), 0, dp(40), dp(24)));
-                line3.addView(padButton("4", () -> { step = 4; buildToolPad(); }), margin(dp(4), 0, dp(40), dp(24)));
-                toolPad.addView(line3, lp(-2, dp(24)));
-            }
-        } else if (tool.equals("rotate")) {
-            LinearLayout line1 = row();
-            line1.addView(padButton("-90° Y", () -> { scene.rotateSelection(-1); afterEdit(); }), lp(dp(60), dp(28)));
-            line1.addView(padButton("+90° Y", () -> { scene.rotateSelection(1); afterEdit(); }), margin(dp(4), 0, dp(60), dp(28)));
-            toolPad.addView(line1, lp(-2, dp(28)));
+    /**
+     * Insert menu, grouped the way Studio's categories are so the list stays usable on a phone.
+     * A container selection receives the new instance; otherwise it lands in Workspace next to the
+     * current selection.
+     */
+    private void insertDialog() {
+        final String[] categories = {"Parts", "Effects", "Lighting", "Scripts and UI", "Containers"};
+        new AlertDialog.Builder(this).setTitle("Insert object")
+                .setItems(categories, (d, which) -> {
+                    final String[] items = INSERT_CATEGORIES[which];
+                    new AlertDialog.Builder(this).setTitle("Insert " + categories[which])
+                            .setItems(items, (d2, index) -> insertInstance(items[index])).show();
+                }).show();
+    }
+
+    private static final String[][] INSERT_CATEGORIES = {
+            {"Part", "Ball", "Cylinder", "Wedge", "CornerWedge", "Truss", "MeshPart", "SpawnLocation", "Seat", "VehicleSeat"},
+            {"Decal", "Texture", "SurfaceAppearance", "ParticleEmitter", "Fire", "Smoke", "Sparkles", "Trail", "Beam", "Sound"},
+            {"PointLight", "SpotLight", "SurfaceLight", "Sky", "Atmosphere", "Clouds", "BloomEffect", "BlurEffect", "ColorCorrectionEffect", "SunRaysEffect", "DepthOfFieldEffect", "ColorGradingEffect"},
+            {"Script", "LocalScript", "ModuleScript", "ScreenGui", "Frame", "TextLabel", "TextButton", "BillboardGui", "SurfaceGui"},
+            {"Folder", "Model", "Configuration", "Camera", "Terrain", "Attachment"}
+    };
+
+    /** Sensible Roblox defaults for the classes Studio inserts with properties set. */
+    private void applyInsertDefaults(Instance instance) {
+        switch (instance.className) {
+            case "Decal": case "Texture":
+                instance.props.put("Face", 5);
+                instance.props.put("Texture", "");
+                instance.props.put("StudsPerTileU", 1d);
+                instance.props.put("StudsPerTileV", 1d);
+                if (instance.className.equals("Texture")) instance.props.put("Transparency", 0d);
+                break;
+            case "PointLight": case "SpotLight": case "SurfaceLight":
+                instance.props.put("Brightness", 1d);
+                instance.props.put("Color", new Instance.Vector3(1, 1, 1));
+                instance.props.put("Range", 8d);
+                instance.props.put("Enabled", true);
+                if (instance.className.equals("SurfaceLight")) instance.props.put("Face", 5);
+                if (instance.className.equals("SpotLight")) { instance.props.put("Angle", 90d); instance.props.put("Face", 5); }
+                break;
+            case "Sky":
+                instance.props.put("CelestialBodiesShown", true);
+                instance.props.put("StarCount", 3000d);
+                instance.props.put("SunAngularSize", 21d);
+                instance.props.put("MoonAngularSize", 11d);
+                break;
+            case "Atmosphere":
+                instance.props.put("Density", 0.3d);
+                instance.props.put("Offset", 0d);
+                instance.props.put("Decay", 0.4d);
+                instance.props.put("Glare", 0d);
+                instance.props.put("Haze", 0d);
+                instance.props.put("Color", new Instance.Vector3(199 / 255.0, 199 / 255.0, 199 / 255.0));
+                break;
+            case "Clouds":
+                instance.props.put("Cover", 0.6d);
+                instance.props.put("Density", 0.7d);
+                instance.props.put("Color", new Instance.Vector3(1, 1, 1));
+                break;
+            case "BloomEffect": instance.props.put("Enabled", true); instance.props.put("Intensity", 1d); instance.props.put("Size", 24d); instance.props.put("Threshold", 2d); break;
+            case "BlurEffect": instance.props.put("Enabled", true); instance.props.put("Size", 24d); break;
+            case "SunRaysEffect": instance.props.put("Enabled", true); instance.props.put("Intensity", 0.25d); instance.props.put("Spread", 1d); break;
+            case "DepthOfFieldEffect": instance.props.put("Enabled", true); instance.props.put("FarIntensity", 0.75d); instance.props.put("FocusDistance", 0.1d); instance.props.put("InFocusRadius", 1d); break;
+            case "ColorCorrectionEffect": instance.props.put("Enabled", true); instance.props.put("Brightness", 0d); instance.props.put("Contrast", 0d); instance.props.put("Saturation", 0d); break;
+            case "ColorGradingEffect": instance.props.put("Enabled", true); break;
+            case "SurfaceAppearance": instance.props.put("AlphaMode", 0); break;
+            case "Folder": case "Model": case "Configuration": case "Terrain": case "Attachment": break;
+            case "ScreenGui": instance.props.put("Enabled", true); break;
+            default: break;
         }
     }
 
-    private void padAction(int axis, int direction, boolean scale) {
-        if (scale) scene.scaleSelection(axis, direction > 0 ? 1.1 : 1 / 1.1);
-        else scene.nudge(axis, direction * step);
+    private void insertInstance(String label) {
+        String cls = label;
+        Instance created;
+        if (label.equals("Ball")) { created = scene.insert("Part"); created.props.put("Shape", 0); }
+        else if (label.equals("Cylinder")) { created = scene.insert("Part"); created.props.put("Shape", 2); }
+        else if (label.equals("Wedge")) created = scene.insert("WedgePart");
+        else if (label.equals("CornerWedge")) created = scene.insert("CornerWedgePart");
+        else if (label.equals("Truss")) created = scene.insert("TrussPart");
+        else created = scene.insert(cls);
+        if (created != null && created.props.isEmpty()) applyInsertDefaults(created);
+        if (created == null) return;
+        expanded.add(created.parent == null ? scene.workspace : created.parent);
+        if (!created.children.isEmpty()) expanded.add(created);
         afterEdit();
-    }
-
-    private TextView padButton(String label, Runnable action) {
-        TextView button = text(label, 11, true, 0xffffffff);
-        button.setGravity(Gravity.CENTER);
-        button.setBackground(shape(0x33ffffff, 6));
-        button.setOnClickListener(v -> action.run());
-        return button;
-    }
-
-    private void insertDialog() {
-        new AlertDialog.Builder(this).setTitle("Insert object")
-                .setItems(Instance.INSERTABLE, (d, which) -> {
-                    Instance created = scene.insert(Instance.INSERTABLE[which]);
-                    expanded.add(created.parent == null ? scene.workspace : created.parent);
-                    afterEdit();
-                }).show();
     }
 
     // ------------------------------------------------------------------ play
     private void startPlay() {
         scene.startPlay();
         playControls.setVisibility(View.VISIBLE);
-        toolPad.setVisibility(View.GONE);
+        if (liftPad != null) liftPad.setVisibility(View.GONE);
+        flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Stop");
         subtitle.setText("Playing locally — drag to look, joystick to move");
         scene.refreshCache();
@@ -879,9 +1295,10 @@ public final class EngineActivity extends Activity {
     private void stopPlay() {
         scene.stopPlay();
         playControls.setVisibility(View.GONE);
-        buildToolPad();
+        if (liftPad != null) liftPad.setVisibility(View.VISIBLE);
+        flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Play");
-        subtitle.setText("Edit mode — changes are local until you save");
+        subtitle.setText("Edit mode — drag to look, joystick to fly, handles to transform");
         scene.refreshCache();
     }
 
@@ -891,12 +1308,22 @@ public final class EngineActivity extends Activity {
         menu.getMenu().add("Focus selection");
         menu.getMenu().add("Select spawn point");
         menu.getMenu().add("Reset camera");
+        menu.getMenu().add("Undo");
+        menu.getMenu().add("Redo");
+        menu.getMenu().add(explorerPanel != null && explorerPanel.getVisibility() == View.VISIBLE ? "Hide Explorer" : "Show Explorer");
+        menu.getMenu().add(propertiesPanel != null && propertiesPanel.getVisibility() == View.VISIBLE ? "Hide Properties" : "Show Properties");
+        menu.getMenu().add(snap ? "Grid snapping: on" : "Grid snapping: off");
         menu.getMenu().add("Engine limits…");
         menu.setOnMenuItemClickListener(item -> {
             String label = item.getTitle().toString();
             if (label.startsWith("Focus") && scene.selection != null) { scene.focus(scene.selection); refresh(); }
             else if (label.startsWith("Select spawn")) { Instance spawn = scene.root.findFirst("SpawnLocation"); if (spawn != null) { scene.selection = spawn; scene.focus(spawn); refresh(); } }
             else if (label.startsWith("Reset camera")) { scene.camTarget[0] = 0; scene.camTarget[1] = 4; scene.camTarget[2] = 0; scene.camDist = 34; scene.camYaw = Math.toRadians(35); scene.camPitch = Math.toRadians(-30); }
+            else if (label.equals("Undo")) undo();
+            else if (label.equals("Redo")) redo();
+            else if (label.endsWith("Explorer")) togglePanel(explorerPanel, explorerSeparator);
+            else if (label.endsWith("Properties")) togglePanel(propertiesPanel, propertiesSeparator);
+            else if (label.startsWith("Grid snapping")) snapMenu();
             else if (label.startsWith("Engine limits")) limitsDialog();
             return true;
         });
@@ -904,17 +1331,23 @@ public final class EngineActivity extends Activity {
     }
 
     private void limitsDialog() {
-        new AlertDialog.Builder(this).setTitle("Engine limits in this build")
-                .setMessage("Solid parts (Part, SpawnLocation, Wedge, Truss, MeshPart) render as boxes with their real size, CFrame and color.\n\n" +
-                        "Lighting is read from the place: ClockTime/GeographicLatitude drive the sun, and Ambient, OutdoorAmbient, " +
+        String textureNote = viewport == null ? "" : viewport.textureNote();
+        new AlertDialog.Builder(this).setTitle("Roblox engine in this build")
+                .setMessage("Solid parts (Part, SpawnLocation, Wedge, Truss, MeshPart, seats) render as boxes with their real size, CFrame, colour and per-face surface type.\n\n" +
+                        "Textures: every face samples its SurfaceType texture (Studs, Inlet, Universal, Hinge, Motor, SteppingMotor, Weld, Glue) or its Enum.Material texture, world aligned and tiled like Roblox tiles them. " +
+                        "Texture, Decal, SurfaceAppearance.ColorMap, MeshPart.TextureID and Sky.Skybox* assets are streamed, cached and applied.\n\n" +
+                        "Lighting is read from the place: ClockTime/TimeOfDay and GeographicLatitude drive the sun, and Ambient, OutdoorAmbient, " +
                         "ColorShift_Top/Bottom, Brightness, FogStart/FogEnd/FogColor, EnvironmentDiffuseScale and " +
                         "EnvironmentSpecularScale all shade the scene. PointLight, SpotLight and SurfaceLight objects light parts " +
-                        "near them (4 at a time), and Material drives metalness/roughness.\n\n" +
-                        "Sky, Atmosphere and Clouds are drawn procedurally: skybox textures are Roblox assets this build cannot fetch. " +
-                        "ColorCorrection, Bloom, Blur, SunRays and ExposureCompensation are applied as a post pass. Shadows " +
-                        "(GlobalShadows/ShadowSoftness), DepthOfField, terrain, textures, particles and animations are not rendered yet.\n\n" +
+                        "near them (4 at a time), and Material drives metalness/roughness. Sky, Atmosphere and Clouds shade the sky and add its haze and cloud layer. " +
+                        "ColorCorrection, Bloom, Blur, SunRays and ExposureCompensation are applied as a post pass.\n\n" +
+                        "Editing: Move/Rotate/Scale handles work by grabbing them, the grab tool slides parts, and the joystick flies the camera. " +
+                        "Grid snapping is in the tool strip.\n\n" +
+                        "Not rendered yet: shadow maps (GlobalShadows/ShadowSoftness are read but no shadow map is produced), DepthOfField, terrain, " +
+                        "particles, animations, and SurfaceAppearance maps other than ColorMap.\n\n" +
                         "Scripts do not run. Unions/Meshes use bounding boxes, and rotated parts collide as axis-aligned boxes.\n\n" +
                         "Saving writes the Roblox XML data model back to this place file; publish from the project page to sync with Roblox."
+                        + (textureNote.isEmpty() ? "" : "\n\n" + textureNote)
                         + (viewport == null || viewport.postNote().isEmpty() ? "" : "\n\n" + viewport.postNote()))
                 .setPositiveButton("Got it", null).show();
     }
