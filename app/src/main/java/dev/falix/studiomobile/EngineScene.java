@@ -48,6 +48,7 @@ final class EngineScene {
     double charHx = 1, charHy = 2.5, charHz = 1;
     volatile AvatarProfile avatar = AvatarProfile.defaultAvatar();
     volatile boolean use3dAvatar = true;
+    volatile boolean classicBaseplate = false;
     volatile double charHealth = 100, charMaxHealth = 100;
     volatile double charWalkPhase = 0, charSpeed = 0;
     volatile double idleTime = 0, landTimer = 0;
@@ -56,6 +57,7 @@ final class EngineScene {
     private Instance standingPart;
     private final double[] standingPartPrev = new double[3];
     private final HashMap<Instance, Double> partVelY = new HashMap<>();
+    Instance livePlayer, liveCharacter, liveHumanoid, liveRootPart;
     volatile double moveX, moveZ;
     volatile boolean jumpQueued;
     double renderYaw = Double.NaN;
@@ -134,6 +136,7 @@ final class EngineScene {
         colliderOwners.clear();
         if (root != null) {
             for (Instance i : root.all(null)) {
+                if (i.getBool("__playChar", false)) continue;
                 if (i.isRenderable()) {
                     renderList.add(i);
                     if (i.getBool("CanCollide", true) && i.getNumber("Transparency", 0) < 0.95) {
@@ -285,7 +288,16 @@ final class EngineScene {
                 if (clash != null && clash != target) name = name + " (2)";
             }
             target.name = name;
-        } else target.props.put(key.intern(), value);
+        } else {
+            target.props.put(key.intern(), value);
+            if (target == liveHumanoid && value instanceof Number) {
+                double nv = ((Number) value).doubleValue();
+                if ("WalkSpeed".equals(key)) walkSpeed = Math.max(0, nv);
+                else if ("JumpPower".equals(key)) jumpPower = Math.max(0, nv);
+                else if ("Health".equals(key)) { charHealth = nv; if (nv <= 0) respawnCharacter(); }
+                else if ("MaxHealth".equals(key)) charMaxHealth = Math.max(1, nv);
+            }
+        }
         markDirty();
     }
 
@@ -398,12 +410,14 @@ final class EngineScene {
         charYaw = camYaw;
         camDist = firstPerson ? 1.0 : 16;
         if (camPitch > -0.15) camPitch = -Math.toRadians(18);
+        spawnLivePlayerInTree();
         lua().startPlayScripts();
     }
 
     synchronized void stopPlay() {
         playing = false;
         if (luaRuntime != null) luaRuntime.stop();
+        livePlayer = liveCharacter = liveHumanoid = liveRootPart = null;
         touchedPrev.clear();
         touchedNow.clear();
         if (playSnapshot != null) {
@@ -417,6 +431,51 @@ final class EngineScene {
     synchronized void damageCharacter(double amount) {
         charHealth = Math.max(0, charHealth - amount);
         if (charHealth <= 0) respawnCharacter();
+    }
+
+    private void spawnLivePlayerInTree() {
+        if (root == null) return;
+        String uname = avatar != null && avatar.username != null ? avatar.username : "Player";
+        Instance players = root.findFirst("Players");
+        if (players == null) { players = new Instance("Players", "Players"); root.add(players); }
+        livePlayer = new Instance("Player", uname);
+        livePlayer.props.put("DisplayName", uname);
+        livePlayer.props.put("UserId", avatar != null ? avatar.userId : 0L);
+        livePlayer.props.put("Neutral", true);
+        players.add(livePlayer);
+
+        if (workspace != null) {
+            liveCharacter = new Instance("Model", uname);
+            liveHumanoid = new Instance("Humanoid", "Humanoid");
+            liveHumanoid.props.put("WalkSpeed", walkSpeed);
+            liveHumanoid.props.put("JumpPower", jumpPower);
+            liveHumanoid.props.put("Health", charHealth);
+            liveHumanoid.props.put("MaxHealth", charMaxHealth);
+            liveHumanoid.props.put("RigType", avatar != null && !avatar.isR15 ? "R6" : "R15");
+            liveCharacter.add(liveHumanoid);
+
+            liveRootPart = makeCharNode("HumanoidRootPart", 2, 2, 1);
+            liveRootPart.setPosition(charPos[0], charPos[1], charPos[2]);
+            liveCharacter.add(liveRootPart);
+            liveCharacter.add(makeCharNode("Head", 1.2, 1.2, 1.2));
+            liveCharacter.add(makeCharNode("Torso", 2, 2, 1));
+            liveCharacter.add(makeCharNode("Left Arm", 1, 2, 1));
+            liveCharacter.add(makeCharNode("Right Arm", 1, 2, 1));
+            liveCharacter.add(makeCharNode("Left Leg", 1, 2, 1));
+            liveCharacter.add(makeCharNode("Right Leg", 1, 2, 1));
+            liveCharacter.add(new Instance("BodyColors", "BodyColors"));
+            workspace.add(liveCharacter);
+        }
+        markDirty();
+    }
+
+    private Instance makeCharNode(String name, double sx, double sy, double sz) {
+        Instance p = Instance.create("Part", name);
+        p.props.put("__playChar", true);
+        p.props.put("size", new Instance.Vector3(sx, sy, sz));
+        p.props.put("Anchored", false);
+        p.props.put("CanCollide", false);
+        return p;
     }
 
     synchronized void respawnCharacter() {
@@ -531,6 +590,12 @@ final class EngineScene {
             luaRuntime.stepHeartbeat(dt);
         }
 
+        if (liveRootPart != null) liveRootPart.setPosition(charPos[0], charPos[1], charPos[2]);
+        if (liveHumanoid != null) {
+            liveHumanoid.props.put("Health", charHealth);
+            liveHumanoid.props.put("WalkSpeed", walkSpeed);
+            liveHumanoid.props.put("JumpPower", jumpPower);
+        }
         if (charPos[1] < -150) respawnCharacter();
     }
 

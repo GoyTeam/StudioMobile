@@ -833,28 +833,46 @@ final class EngineTextures {
                 break;
             }
             case "Studs": {
-                fill(c, 236);
+                fill(c, 226);
+                for (int i = 0; i <= 4; i++) {
+                    float pos = i * 32f;
+                    line(c, pos, 0, pos, TILE_SIZE, 1.2f, 205);
+                    line(c, 0, pos, TILE_SIZE, pos, 1.2f, 205);
+                }
                 for (int row = 0; row < 4; row++)
                     for (int col = 0; col < 4; col++) {
                         float x = col * 32 + 16, y = row * 32 + 16;
-                        dot(c, x, y, 11, 252);
+                        dot(c, x + 1.2f, y + 1.4f, 10.5f, 168);
+                        dot(c, x, y, 10.2f, 246);
                         PAINT.setStyle(Paint.Style.STROKE);
-                        PAINT.setStrokeWidth(2.6f);
-                        PAINT.setColor(Color.rgb(196, 196, 196));
-                        c.drawCircle(x, y, 11, PAINT);
+                        PAINT.setStrokeWidth(2.0f);
+                        PAINT.setColor(Color.rgb(255, 255, 255));
+                        c.drawArc(new RectF(x - 9.5f, y - 9.5f, x + 9.5f, y + 9.5f), 195, 130, false, PAINT);
+                        PAINT.setColor(Color.rgb(172, 172, 172));
+                        c.drawArc(new RectF(x - 9.5f, y - 9.5f, x + 9.5f, y + 9.5f), 15, 130, false, PAINT);
+                        PAINT.setStrokeWidth(1.2f);
+                        PAINT.setColor(Color.rgb(214, 214, 214));
+                        c.drawCircle(x, y, 6.2f, PAINT);
                     }
                 break;
             }
             case "Inlet": {
-                fill(c, 226);
+                fill(c, 222);
+                for (int i = 0; i <= 4; i++) {
+                    float pos = i * 32f;
+                    line(c, pos, 0, pos, TILE_SIZE, 1.2f, 198);
+                    line(c, 0, pos, TILE_SIZE, pos, 1.2f, 198);
+                }
                 for (int row = 0; row < 4; row++)
                     for (int col = 0; col < 4; col++) {
                         float x = col * 32 + 16, y = row * 32 + 16;
-                        dot(c, x, y, 10, 172);
+                        dot(c, x, y, 10.2f, 170);
                         PAINT.setStyle(Paint.Style.STROKE);
-                        PAINT.setStrokeWidth(2.4f);
-                        PAINT.setColor(Color.rgb(206, 206, 206));
-                        c.drawCircle(x, y, 10, PAINT);
+                        PAINT.setStrokeWidth(2.0f);
+                        PAINT.setColor(Color.rgb(138, 138, 138));
+                        c.drawArc(new RectF(x - 9.5f, y - 9.5f, x + 9.5f, y + 9.5f), 195, 130, false, PAINT);
+                        PAINT.setColor(Color.rgb(245, 245, 245));
+                        c.drawArc(new RectF(x - 9.5f, y - 9.5f, x + 9.5f, y + 9.5f), 15, 130, false, PAINT);
                     }
                 break;
             }
@@ -926,17 +944,42 @@ final class EngineTextures {
                 break;
             }
             case "SpawnPad": {
-                fill(c, 240);
+                fill(c, 224);
+                float cx = TILE_SIZE / 2f, cy = TILE_SIZE / 2f;
+                // Outer crisp border frame
                 PAINT.setStyle(Paint.Style.STROKE);
-                PAINT.setStrokeWidth(6);
-                PAINT.setColor(Color.rgb(170, 170, 170));
-                c.drawCircle(TILE_SIZE / 2f, TILE_SIZE / 2f, 44, PAINT);
-                PAINT.setStrokeWidth(10);
-                PAINT.setColor(Color.rgb(120, 120, 120));
-                c.drawCircle(TILE_SIZE / 2f, TILE_SIZE / 2f, 16, PAINT);
+                PAINT.setStrokeWidth(3.5f);
+                PAINT.setColor(Color.rgb(168, 168, 168));
+                c.drawRect(4, 4, TILE_SIZE - 4, TILE_SIZE - 4, PAINT);
+                // Official Roblox SpawnLocation 8-point starburst / sun emblem
                 PAINT.setStyle(Paint.Style.FILL);
-                PAINT.setColor(Color.rgb(150, 150, 150));
-                c.drawCircle(TILE_SIZE / 2f, TILE_SIZE / 2f, 5, PAINT);
+                PAINT.setColor(Color.rgb(252, 252, 252));
+                android.graphics.Path star = new android.graphics.Path();
+                int points = 8;
+                for (int k = 0; k < points * 2; k++) {
+                    double ang = k * Math.PI / points - Math.PI / 2.0;
+                    float rad = (k % 2 == 0) ? 50f : 27f;
+                    float px = cx + (float) Math.cos(ang) * rad;
+                    float py = cy + (float) Math.sin(ang) * rad;
+                    if (k == 0) star.moveTo(px, py); else star.lineTo(px, py);
+                }
+                star.close();
+                c.drawPath(star, PAINT);
+                PAINT.setStyle(Paint.Style.STROKE);
+                PAINT.setStrokeWidth(3.2f);
+                PAINT.setColor(Color.rgb(138, 138, 138));
+                c.drawPath(star, PAINT);
+                // Inner Roblox Spawn circle
+                PAINT.setStyle(Paint.Style.FILL);
+                PAINT.setColor(Color.rgb(236, 236, 236));
+                c.drawCircle(cx, cy, 20f, PAINT);
+                PAINT.setStyle(Paint.Style.STROKE);
+                PAINT.setStrokeWidth(4.5f);
+                PAINT.setColor(Color.rgb(112, 112, 112));
+                c.drawCircle(cx, cy, 19f, PAINT);
+                PAINT.setStyle(Paint.Style.FILL);
+                PAINT.setColor(Color.rgb(255, 255, 255));
+                c.drawCircle(cx, cy, 9.5f, PAINT);
                 break;
             }
             default: {

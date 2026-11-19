@@ -4,22 +4,35 @@ import android.graphics.Bitmap;
 import org.json.*;
 import java.io.*;
 import java.net.URL;
-import java.nio.*;
 import java.util.*;
 
 final class AvatarMesh {
-    final float[] positions;
-    final float[] normals;
-    final float[] uvs;
-    final int vertexCount;
-    final Bitmap textureBitmap;
+    static final class SubMesh {
+        final String materialName;
+        final float[] positions;
+        final float[] normals;
+        final float[] uvs;
+        final int vertexCount;
+        final Bitmap texture;
 
-    AvatarMesh(float[] positions, float[] normals, float[] uvs, int vertexCount, Bitmap textureBitmap) {
-        this.positions = positions;
-        this.normals = normals;
-        this.uvs = uvs;
-        this.vertexCount = vertexCount;
-        this.textureBitmap = textureBitmap;
+        SubMesh(String materialName, float[] positions, float[] normals, float[] uvs, int vertexCount, Bitmap texture) {
+            this.materialName = materialName;
+            this.positions = positions;
+            this.normals = normals;
+            this.uvs = uvs;
+            this.vertexCount = vertexCount;
+            this.texture = texture;
+        }
+    }
+
+    final ArrayList<SubMesh> subMeshes;
+    final int totalVertices;
+    final String debugInfo;
+
+    AvatarMesh(ArrayList<SubMesh> subMeshes, int totalVertices, String debugInfo) {
+        this.subMeshes = subMeshes;
+        this.totalVertices = totalVertices;
+        this.debugInfo = debugInfo;
     }
 
     static String rbxCdnUrl(String hash) {
@@ -28,87 +41,169 @@ final class AvatarMesh {
         return "https://t" + (i & 7) + ".rbxcdn.com/" + hash;
     }
 
-    static AvatarMesh fetch(RobloxApi api, long userId) {
+    static AvatarMesh fetch(RobloxApi api, long userId, StringBuilder diag) {
         if (api == null || userId <= 0) return null;
         try {
             String manifestUrl = null;
-            for (int attempt = 0; attempt < 4; attempt++) {
+            String lastState = "none";
+            for (int attempt = 0; attempt < 5; attempt++) {
                 JSONObject resp = api.json("https://thumbnails.roblox.com/v1/users/avatar-3d?userId=" + userId, null, null);
-                String state = resp.optString("state", "");
+                lastState = resp.optString("state", "");
                 String url = resp.optString("imageUrl", "");
-                if ("Completed".equalsIgnoreCase(state) && !url.isEmpty()) {
+                if ("Completed".equalsIgnoreCase(lastState) && !url.isEmpty()) {
                     manifestUrl = url;
                     break;
                 }
-                if (!"Pending".equalsIgnoreCase(state) && !"InReview".equalsIgnoreCase(state)) break;
-                Thread.sleep(700);
+                if (!"Pending".equalsIgnoreCase(lastState) && !"InReview".equalsIgnoreCase(lastState)) break;
+                Thread.sleep(750);
             }
-            if (manifestUrl == null) return null;
+            if (manifestUrl == null) {
+                if (diag != null) diag.append("3D state=").append(lastState);
+                return null;
+            }
 
             JSONObject manifest = api.json(manifestUrl, null, null);
             String objHash = manifest.optString("obj", "");
-            if (objHash.isEmpty()) return null;
+            String mtlHash = manifest.optString("mtl", "");
+            if (objHash.isEmpty()) {
+                if (diag != null) diag.append("3D no obj hash");
+                return null;
+            }
 
-            String objUrl = rbxCdnUrl(objHash);
-            String objText = downloadText(objUrl);
-            if (objText == null || objText.isEmpty()) return null;
+            String objText = downloadCdnText(objHash);
+            if (objText == null || objText.isEmpty()) {
+                if (diag != null) diag.append("3D obj download failed");
+                return null;
+            }
 
-            Bitmap tex = null;
+            HashMap<String, String> mtlTexHashes = new HashMap<>();
+            if (!mtlHash.isEmpty()) {
+                String mtlText = downloadCdnText(mtlHash);
+                if (mtlText != null) parseMtl(mtlText, mtlTexHashes);
+            }
+
+            ArrayList<String> fallbackTexHashes = new ArrayList<>();
             JSONArray textures = manifest.optJSONArray("textures");
-            if (textures != null && textures.length() > 0) {
+            if (textures != null) {
                 for (int i = 0; i < textures.length(); i++) {
                     String th = textures.optString(i, "");
-                    if (th.isEmpty()) continue;
-                    try {
-                        tex = api.image(rbxCdnUrl(th), 512);
-                        if (tex != null) break;
-                    } catch (Throwable ignored) { }
+                    if (!th.isEmpty()) fallbackTexHashes.add(th);
                 }
             }
-            return parseObj(objText, tex);
-        } catch (Throwable ignored) {
+
+            HashMap<String, Bitmap> texCache = new HashMap<>();
+            Bitmap defaultTex = null;
+            for (String h : fallbackTexHashes) {
+                defaultTex = downloadCdnBitmap(api, h);
+                if (defaultTex != null) {
+                    texCache.put(h, defaultTex);
+                    break;
+                }
+            }
+
+            return parseObj(api, objText, mtlTexHashes, texCache, defaultTex);
+        } catch (Throwable err) {
+            if (diag != null) diag.append("3D err: ").append(err.getClass().getSimpleName());
             return null;
         }
     }
 
-    private static String downloadText(String location) throws Exception {
-        for (int r = 0; r < 5; r++) {
-            URL u = new URL(location);
-            if (!RobloxApi.imageHost(u)) return null;
-            okhttp3.Request req = new okhttp3.Request.Builder().url(location).get().build();
-            try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
-                if (res.code() >= 300 && res.code() < 400) {
-                    String next = res.header("Location");
-                    if (next == null) return null;
-                    location = new URL(u, next).toString();
-                    continue;
+    private static void parseMtl(String mtlText, HashMap<String, String> out) {
+        String current = null;
+        BufferedReader br = new BufferedReader(new StringReader(mtlText));
+        try {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (line.startsWith("newmtl ")) {
+                    current = line.substring(7).trim();
+                } else if (current != null && line.startsWith("map_Kd ")) {
+                    String hash = line.substring(7).trim();
+                    int slash = hash.lastIndexOf('/');
+                    if (slash >= 0) hash = hash.substring(slash + 1);
+                    if (!hash.isEmpty()) out.put(current, hash);
                 }
-                if (!res.isSuccessful() || res.body() == null) return null;
-                byte[] bytes;
-                try (InputStream in = res.body().byteStream()) {
-                    ByteArrayOutputStream out = new ByteArrayOutputStream();
-                    byte[] buf = new byte[16384];
-                    int n; long total = 0;
-                    while ((n = in.read(buf)) != -1) {
-                        total += n;
-                        if (total > 8 * 1024 * 1024) return null;
-                        out.write(buf, 0, n);
-                    }
-                    bytes = out.toByteArray();
-                }
-                return new String(bytes, "UTF-8");
             }
+        } catch (Exception ignored) { }
+    }
+
+    private static String downloadCdnText(String hash) {
+        String primary = rbxCdnUrl(hash);
+        String txt = tryDownloadText(primary);
+        if (txt != null) return txt;
+        for (int s = 0; s < 8; s++) {
+            String url = "https://t" + s + ".rbxcdn.com/" + hash;
+            if (url.equals(primary)) continue;
+            txt = tryDownloadText(url);
+            if (txt != null) return txt;
         }
+        return tryDownloadText("https://tr.rbxcdn.com/" + hash);
+    }
+
+    private static Bitmap downloadCdnBitmap(RobloxApi api, String hash) {
+        String primary = rbxCdnUrl(hash);
+        try {
+            Bitmap b = api.image(primary, 512);
+            if (b != null) return b;
+        } catch (Throwable ignored) { }
+        for (int s = 0; s < 8; s++) {
+            String url = "https://t" + s + ".rbxcdn.com/" + hash;
+            if (url.equals(primary)) continue;
+            try {
+                Bitmap b = api.image(url, 512);
+                if (b != null) return b;
+            } catch (Throwable ignored) { }
+        }
+        try { return api.image("https://tr.rbxcdn.com/" + hash, 512); } catch (Throwable ignored) { return null; }
+    }
+
+    private static String tryDownloadText(String location) {
+        try {
+            for (int r = 0; r < 5; r++) {
+                URL u = new URL(location);
+                if (!RobloxApi.imageHost(u)) return null;
+                okhttp3.Request req = new okhttp3.Request.Builder().url(location).get().build();
+                try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
+                    if (res.code() >= 300 && res.code() < 400) {
+                        String next = res.header("Location");
+                        if (next == null) return null;
+                        location = new URL(u, next).toString();
+                        continue;
+                    }
+                    if (!res.isSuccessful() || res.body() == null) return null;
+                    byte[] bytes;
+                    try (InputStream in = res.body().byteStream()) {
+                        ByteArrayOutputStream out = new ByteArrayOutputStream();
+                        byte[] buf = new byte[16384];
+                        int n; long total = 0;
+                        while ((n = in.read(buf)) != -1) {
+                            total += n;
+                            if (total > 10 * 1024 * 1024) return null;
+                            out.write(buf, 0, n);
+                        }
+                        bytes = out.toByteArray();
+                    }
+                    return new String(bytes, "UTF-8");
+                }
+            }
+        } catch (Throwable ignored) { }
         return null;
     }
 
-    static AvatarMesh parseObj(String objText, Bitmap tex) {
+    private static final class Bucket {
+        final ArrayList<Float> pos = new ArrayList<>();
+        final ArrayList<Float> norm = new ArrayList<>();
+        final ArrayList<Float> uv = new ArrayList<>();
+    }
+
+    private static AvatarMesh parseObj(RobloxApi api, String objText, HashMap<String, String> mtlTexHashes,
+                                       HashMap<String, Bitmap> texCache, Bitmap defaultTex) {
         ArrayList<Float> vs = new ArrayList<>();
         ArrayList<Float> vts = new ArrayList<>();
         ArrayList<Float> vns = new ArrayList<>();
-        ArrayList<Float> outPos = new ArrayList<>();
-        ArrayList<Float> outNorm = new ArrayList<>();
-        ArrayList<Float> outUv = new ArrayList<>();
+        LinkedHashMap<String, Bucket> buckets = new LinkedHashMap<>();
+        String curMtl = "default";
+        buckets.put(curMtl, new Bucket());
 
         float minX = Float.MAX_VALUE, maxX = -Float.MAX_VALUE;
         float minY = Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
@@ -120,7 +215,10 @@ final class AvatarMesh {
             while ((line = br.readLine()) != null) {
                 line = line.trim();
                 if (line.isEmpty() || line.startsWith("#")) continue;
-                if (line.startsWith("v ")) {
+                if (line.startsWith("usemtl ")) {
+                    curMtl = line.substring(7).trim();
+                    if (!buckets.containsKey(curMtl)) buckets.put(curMtl, new Bucket());
+                } else if (line.startsWith("v ")) {
                     String[] p = line.split("\\s+");
                     if (p.length >= 4) {
                         float x = Float.parseFloat(p[1]);
@@ -147,6 +245,7 @@ final class AvatarMesh {
                 } else if (line.startsWith("f ")) {
                     String[] p = line.split("\\s+");
                     if (p.length < 4) continue;
+                    Bucket b = buckets.get(curMtl);
                     int count = p.length - 1;
                     int[] vi = new int[count], ti = new int[count], ni = new int[count];
                     for (int k = 0; k < count; k++) {
@@ -156,36 +255,54 @@ final class AvatarMesh {
                         ni[k] = idx.length > 2 && !idx[2].isEmpty() ? parseIndex(idx[2], vns.size() / 3) : -1;
                     }
                     for (int k = 1; k + 1 < count; k++) {
-                        emitVert(vs, vts, vns, vi[0], ti[0], ni[0], outPos, outNorm, outUv);
-                        emitVert(vs, vts, vns, vi[k], ti[k], ni[k], outPos, outNorm, outUv);
-                        emitVert(vs, vts, vns, vi[k + 1], ti[k + 1], ni[k + 1], outPos, outNorm, outUv);
+                        emitVert(vs, vts, vns, vi[0], ti[0], ni[0], b);
+                        emitVert(vs, vts, vns, vi[k], ti[k], ni[k], b);
+                        emitVert(vs, vts, vns, vi[k + 1], ti[k + 1], ni[k + 1], b);
                     }
                 }
             }
         } catch (Exception ignored) { }
 
-        int vertCount = outPos.size() / 3;
-        if (vertCount < 3 || maxY <= minY) return null;
-
+        if (maxY <= minY) return null;
         float cx = (minX + maxX) * 0.5f;
         float cz = (minZ + maxZ) * 0.5f;
         float height = maxY - minY;
         float scale = 5.2f / Math.max(0.5f, height);
 
-        float[] posArr = new float[outPos.size()];
-        float[] normArr = new float[outNorm.size()];
-        float[] uvArr = new float[outUv.size()];
-        for (int i = 0; i < vertCount; i++) {
-            posArr[i * 3] = (outPos.get(i * 3) - cx) * scale;
-            posArr[i * 3 + 1] = (outPos.get(i * 3 + 1) - minY) * scale;
-            posArr[i * 3 + 2] = (outPos.get(i * 3 + 2) - cz) * scale;
-            normArr[i * 3] = outNorm.get(i * 3);
-            normArr[i * 3 + 1] = outNorm.get(i * 3 + 1);
-            normArr[i * 3 + 2] = outNorm.get(i * 3 + 2);
-            uvArr[i * 2] = outUv.get(i * 2);
-            uvArr[i * 2 + 1] = outUv.get(i * 2 + 1);
+        ArrayList<SubMesh> subMeshes = new ArrayList<>();
+        int totalVerts = 0;
+        for (Map.Entry<String, Bucket> entry : buckets.entrySet()) {
+            Bucket b = entry.getValue();
+            int vc = b.pos.size() / 3;
+            if (vc < 3) continue;
+            float[] posArr = new float[b.pos.size()];
+            float[] normArr = new float[b.norm.size()];
+            float[] uvArr = new float[b.uv.size()];
+            for (int i = 0; i < vc; i++) {
+                posArr[i * 3] = (b.pos.get(i * 3) - cx) * scale;
+                posArr[i * 3 + 1] = (b.pos.get(i * 3 + 1) - minY) * scale;
+                posArr[i * 3 + 2] = (b.pos.get(i * 3 + 2) - cz) * scale;
+                normArr[i * 3] = b.norm.get(i * 3);
+                normArr[i * 3 + 1] = b.norm.get(i * 3 + 1);
+                normArr[i * 3 + 2] = b.norm.get(i * 3 + 2);
+                uvArr[i * 2] = b.uv.get(i * 2);
+                uvArr[i * 2 + 1] = b.uv.get(i * 2 + 1);
+            }
+            Bitmap tex = defaultTex;
+            String hash = mtlTexHashes.get(entry.getKey());
+            if (hash != null && !hash.isEmpty()) {
+                Bitmap cached = texCache.get(hash);
+                if (cached == null) {
+                    cached = downloadCdnBitmap(api, hash);
+                    if (cached != null) texCache.put(hash, cached);
+                }
+                if (cached != null) tex = cached;
+            }
+            subMeshes.add(new SubMesh(entry.getKey(), posArr, normArr, uvArr, vc, tex));
+            totalVerts += vc;
         }
-        return new AvatarMesh(posArr, normArr, uvArr, vertCount, tex);
+        if (subMeshes.isEmpty()) return null;
+        return new AvatarMesh(subMeshes, totalVerts, subMeshes.size() + " mats, " + totalVerts + " verts");
     }
 
     private static int parseIndex(String token, int total) {
@@ -194,22 +311,21 @@ final class AvatarMesh {
     }
 
     private static void emitVert(ArrayList<Float> vs, ArrayList<Float> vts, ArrayList<Float> vns,
-                                 int vi, int ti, int ni,
-                                 ArrayList<Float> outPos, ArrayList<Float> outNorm, ArrayList<Float> outUv) {
+                                 int vi, int ti, int ni, Bucket b) {
         if (vi < 0 || vi * 3 + 2 >= vs.size()) {
-            outPos.add(0f); outPos.add(0f); outPos.add(0f);
+            b.pos.add(0f); b.pos.add(0f); b.pos.add(0f);
         } else {
-            outPos.add(vs.get(vi * 3)); outPos.add(vs.get(vi * 3 + 1)); outPos.add(vs.get(vi * 3 + 2));
+            b.pos.add(vs.get(vi * 3)); b.pos.add(vs.get(vi * 3 + 1)); b.pos.add(vs.get(vi * 3 + 2));
         }
         if (ni >= 0 && ni * 3 + 2 < vns.size()) {
-            outNorm.add(vns.get(ni * 3)); outNorm.add(vns.get(ni * 3 + 1)); outNorm.add(vns.get(ni * 3 + 2));
+            b.norm.add(vns.get(ni * 3)); b.norm.add(vns.get(ni * 3 + 1)); b.norm.add(vns.get(ni * 3 + 2));
         } else {
-            outNorm.add(0f); outNorm.add(1f); outNorm.add(0f);
+            b.norm.add(0f); b.norm.add(1f); b.norm.add(0f);
         }
         if (ti >= 0 && ti * 2 + 1 < vts.size()) {
-            outUv.add(vts.get(ti * 2)); outUv.add(vts.get(ti * 2 + 1));
+            b.uv.add(vts.get(ti * 2)); b.uv.add(vts.get(ti * 2 + 1));
         } else {
-            outUv.add(0f); outUv.add(0f);
+            b.uv.add(0f); b.uv.add(0f);
         }
     }
 }

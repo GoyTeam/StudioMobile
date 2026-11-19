@@ -103,19 +103,16 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec3 base = uColor;\n" +
             "  if (uIsBaseplate > 0.5 && n.y > 0.5) {\n" +
             "    float camD = length(uEye - vWorld);\n" +
-            "    float distFade = 1.0 - smoothstep(40.0, 260.0, camD);\n" +
-            "    vec2 f1 = fract(vWorld.xz);\n" +
-            "    vec2 g1 = abs(f1 - 0.5);\n" +
-            "    float line1 = smoothstep(0.455, 0.495, max(g1.x, g1.y));\n" +
+            "    float fade1 = 1.0 - smoothstep(18.0, 75.0, camD);\n" +
+            "    float fade4 = 1.0 - smoothstep(65.0, 290.0, camD);\n" +
+            "    vec2 g1 = abs(fract(vWorld.xz) - 0.5);\n" +
+            "    float line1 = smoothstep(0.468, 0.496, max(g1.x, g1.y));\n" +
             "    vec2 g4 = abs(fract(vWorld.xz * 0.25) - 0.5);\n" +
-            "    float line4 = smoothstep(0.478, 0.496, max(g4.x, g4.y));\n" +
-            "    vec2 studC = f1 - 0.5;\n" +
-            "    float sr = length(studC);\n" +
-            "    float bevelSun = dot(normalize(vec3(studC.x, 0.25, studC.y)), uSunDir) * smoothstep(0.34, 0.25, sr) * smoothstep(0.14, 0.24, sr);\n" +
+            "    float line4 = smoothstep(0.482, 0.497, max(g4.x, g4.y));\n" +
             "    vec2 checker = floor(vWorld.xz * 0.25);\n" +
-            "    float tileShade = mod(checker.x + checker.y, 2.0) * 0.032;\n" +
-            "    vec3 studioSlate = vec3(0.43, 0.45, 0.48);\n" +
-            "    base = studioSlate * (1.0 - (line1 * 0.08 + line4 * 0.24 + tileShade) * distFade + bevelSun * 0.14 * distFade);\n" +
+            "    float tileShade = mod(checker.x + checker.y, 2.0) * 0.024;\n" +
+            "    vec3 studioSlate = vec3(0.44, 0.46, 0.49);\n" +
+            "    base = studioSlate * (1.0 - line1 * 0.045 * fade1 - (line4 * 0.17 + tileShade) * fade4);\n" +
             "  } else if (tile.w > 0.5) {\n" +
             "    base *= texture2D(uAtlas, atlasUv).rgb;\n" +
             "  }\n" +
@@ -270,9 +267,12 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private int aPos, aLocal, aFace, uMvp, uModel, uNormal, uLightVp, uShadowMap, uHasShadow, uUseCustomNorm, uColor, uAlpha;
     private int shPos, shLightMvp;
     private int avatarProgram, avPos, avNorm, avUv, avMvp, avNormal, avTex, avHasTex, avSunDir, avSunColor, avSunGain, avAmbient;
+    private static final class GlSubMesh {
+        FloatBuffer pos, norm, uv;
+        int tex, count;
+    }
     private AvatarMesh uploadedAvatarMesh;
-    private FloatBuffer avatarPosBuf, avatarNormBuf, avatarUvBuf;
-    private int avatarGlTex, avatarVertCount;
+    private final ArrayList<GlSubMesh> glAvatarParts = new ArrayList<>();
     private FloatBuffer cubeUvBuf, headPosBuf, headNormBuf, headUvBuf;
     private ShortBuffer headIndices;
     private int headIndexCount;
@@ -931,13 +931,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             double[] p = scene.charPos;
             double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
             float cosYaw = (float) Math.cos(yaw), sinYaw = (float) Math.sin(yaw);
-            if (avatarPosBuf != null && avatarVertCount > 0 && scene.use3dAvatar) {
+            if (!glAvatarParts.isEmpty() && scene.use3dAvatar) {
                 double[] cc = {p[0], p[1] - scene.charHy, p[2], cosYaw, 0, sinYaw, 0, 1, 0, -sinYaw, 0, cosYaw};
                 setModel(cc, 1f, 1f, 1f);
                 Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
                 GLES20.glUniformMatrix4fv(shLightMvp, 1, false, mLightMvp, 0);
-                GLES20.glVertexAttribPointer(shPos, 3, GLES20.GL_FLOAT, false, 0, avatarPosBuf);
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, avatarVertCount);
+                for (GlSubMesh sub : glAvatarParts) {
+                    GLES20.glVertexAttribPointer(shPos, 3, GLES20.GL_FLOAT, false, 0, sub.pos);
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, sub.count);
+                }
             } else {
                 double[] cc = {p[0], p[1] - scene.charHy + 2.6, p[2], cosYaw, 0, sinYaw, 0, 1, 0, -sinYaw, 0, cosYaw};
                 setModel(cc, 2.2f, 5.0f, 1.2f);
@@ -1166,7 +1168,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             if (shape == 0) meshKind = 0;
             else if (shape == 2) meshKind = 2;
         }
-        boolean isBaseplate = !spawn && ("Baseplate".equalsIgnoreCase(part.name) || (sx >= 100f && sz >= 100f && sy <= 32f));
+        boolean isBaseplate = !spawn && !scene.classicBaseplate && ("Baseplate".equalsIgnoreCase(part.name) || (sx >= 100f && sz >= 100f && sy <= 32f));
         if (uIsBaseplate >= 0) GLES20.glUniform1f(uIsBaseplate, isBaseplate ? 1f : 0f);
         drawMesh(meshKind, r, g, b, alpha, material, light.specularScale + reflectance, spawn ? 1f : 0f,
                 assetTexture != 0 ? assetTexture : (sampleAtlas ? atlas : 0),
@@ -1179,6 +1181,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         String[] keys = {"RightSurface", "LeftSurface", "TopSurface", "BottomSurface", "BackSurface", "FrontSurface"};
         for (int face = 0; face < 6; face++) {
             int surface = part.getInt(keys[face], 0);
+            if (scene.classicBaseplate && face == 2 && "Baseplate".equalsIgnoreCase(part.name)) surface = 3;
             int tile = surface == 0 ? materialTile : textures.surfaceTile(surface);
             float studs = textures.tileStuds(tile);
             faceTiles[face * 4] = (tile % EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES;
@@ -1314,21 +1317,18 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         }
         if (av.mesh3d == null || av.mesh3d == uploadedAvatarMesh) return;
         uploadedAvatarMesh = av.mesh3d;
-        avatarPosBuf = floatBuffer(uploadedAvatarMesh.positions);
-        avatarNormBuf = floatBuffer(uploadedAvatarMesh.normals);
-        avatarUvBuf = floatBuffer(uploadedAvatarMesh.uvs);
-        avatarVertCount = uploadedAvatarMesh.vertexCount;
-        if (avatarGlTex != 0) { GLES20.glDeleteTextures(1, new int[]{avatarGlTex}, 0); avatarGlTex = 0; }
-        if (uploadedAvatarMesh.textureBitmap != null && !uploadedAvatarMesh.textureBitmap.isRecycled()) {
-            int[] ids = new int[1];
-            GLES20.glGenTextures(1, ids, 0);
-            avatarGlTex = ids[0];
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, avatarGlTex);
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, uploadedAvatarMesh.textureBitmap, 0);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        for (GlSubMesh old : glAvatarParts) {
+            if (old.tex != 0) GLES20.glDeleteTextures(1, new int[]{old.tex}, 0);
+        }
+        glAvatarParts.clear();
+        for (AvatarMesh.SubMesh sm : uploadedAvatarMesh.subMeshes) {
+            GlSubMesh g = new GlSubMesh();
+            g.pos = floatBuffer(sm.positions);
+            g.norm = floatBuffer(sm.normals);
+            g.uv = floatBuffer(sm.uvs);
+            g.count = sm.vertexCount;
+            g.tex = sm.texture != null ? uploadBitmapTex(0, sm.texture) : 0;
+            glAvatarParts.add(g);
         }
     }
 
@@ -1337,7 +1337,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         if (uIsBaseplate >= 0) GLES20.glUniform1f(uIsBaseplate, 0f);
         AvatarProfile av = scene.avatar != null ? scene.avatar : AvatarProfile.defaultAvatar();
         ensureAvatarMeshUploaded();
-        if (scene.use3dAvatar && avatarPosBuf != null && avatarVertCount > 0) {
+        if (scene.use3dAvatar && !glAvatarParts.isEmpty()) {
             double[] p = scene.charPos;
             double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
             float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
@@ -1361,17 +1361,17 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             GLES20.glUniform1f(avSunGain, (float) light.sunGain);
             GLES20.glUniform3f(avAmbient, (float) light.ambientDiffuse[0], (float) light.ambientDiffuse[1], (float) light.ambientDiffuse[2]);
             GLES20.glUniform1i(avTex, 0);
-            if (avatarGlTex != 0) {
-                bindTexture(0, avatarGlTex);
-                GLES20.glUniform1f(avHasTex, 1f);
-            } else {
-                GLES20.glUniform1f(avHasTex, 0f);
-            }
             GLES20.glEnableVertexAttribArray(avPos);
-            GLES20.glVertexAttribPointer(avPos, 3, GLES20.GL_FLOAT, false, 0, avatarPosBuf);
-            if (avNorm >= 0) { GLES20.glEnableVertexAttribArray(avNorm); GLES20.glVertexAttribPointer(avNorm, 3, GLES20.GL_FLOAT, false, 0, avatarNormBuf); }
-            if (avUv >= 0) { GLES20.glEnableVertexAttribArray(avUv); GLES20.glVertexAttribPointer(avUv, 2, GLES20.GL_FLOAT, false, 0, avatarUvBuf); }
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, avatarVertCount);
+            if (avNorm >= 0) GLES20.glEnableVertexAttribArray(avNorm);
+            if (avUv >= 0) GLES20.glEnableVertexAttribArray(avUv);
+            for (GlSubMesh sub : glAvatarParts) {
+                if (sub.tex != 0) { bindTexture(0, sub.tex); GLES20.glUniform1f(avHasTex, 1f); }
+                else GLES20.glUniform1f(avHasTex, 0f);
+                GLES20.glVertexAttribPointer(avPos, 3, GLES20.GL_FLOAT, false, 0, sub.pos);
+                if (avNorm >= 0) GLES20.glVertexAttribPointer(avNorm, 3, GLES20.GL_FLOAT, false, 0, sub.norm);
+                if (avUv >= 0) GLES20.glVertexAttribPointer(avUv, 2, GLES20.GL_FLOAT, false, 0, sub.uv);
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, sub.count);
+            }
             GLES20.glDisableVertexAttribArray(avPos);
             if (avNorm >= 0) GLES20.glDisableVertexAttribArray(avNorm);
             if (avUv >= 0) GLES20.glDisableVertexAttribArray(avUv);
@@ -1405,10 +1405,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         // True beveled Roblox Head cylinder with composited Face texture + optional hair
         float headY = 4.62f * hs + bob;
         drawTexturedLimb(p, cy, sy, 0, headY, 0, 0, 0, 1.20f * hds, 1.22f * hds, 1.20f * hds, headFaceTex, light, true);
-        if (av.hasHair && av.hairColor != null) {
-            charPart(p, cy, sy, 0, headY + 0.46f * hds, -0.05f * hds, 0, 0, 1.28f * hds, 0.42f * hds, 1.28f * hds, av.hairColor, skin, light, 1);
-            charPart(p, cy, sy, 0, headY + 0.05f * hds, -0.56f * hds, 0, 0, 1.24f * hds, 0.92f * hds, 0.20f * hds, av.hairColor, skin, light, 1);
-        }
+
 
         if (!av.isR15) {
             // Classic Roblox R6 Rig with real UV-mapped Shirt/Pants textures

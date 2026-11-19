@@ -21,6 +21,7 @@ final class AvatarProfile {
     float widthScale = 1.0f;
     float headScale = 1.0f;
     float depthScale = 1.0f;
+    long userId = 0;
     String username = "Player";
     int assetCount = 0;
     boolean loadedFromRoblox = false;
@@ -50,14 +51,15 @@ final class AvatarProfile {
         sb.append("Avatar @").append(username)
           .append(" (").append(isR15 ? "R15" : "R6")
           .append(", ").append(assetCount).append(" items");
-        if (mesh3d != null) sb.append(", 3D mesh ").append(mesh3d.vertexCount).append(" verts");
-        else sb.append(", UV textures ready");
+        if (mesh3d != null) sb.append(", 3D: ").append(mesh3d.debugInfo);
+        else sb.append(", rig mode (").append(statusNote).append(")");
         sb.append(")");
         return sb.toString();
     }
 
     static AvatarProfile fetchForUser(RobloxApi api, long userId, String username) {
         AvatarProfile p = new AvatarProfile();
+        p.userId = userId;
         if (username != null && !username.isEmpty()) p.username = username;
         if (userId <= 0 || api == null) {
             p.buildFallbackTextures();
@@ -143,9 +145,9 @@ final class AvatarProfile {
                 p.shirtColor = sampleRegion(fullBody, w * 36 / 100, w * 64 / 100, h * 36 / 100, h * 54 / 100, false);
                 p.sleeveColor = sampleRegion(fullBody, w * 22 / 100, w * 34 / 100, h * 38 / 100, h * 54 / 100, false);
                 p.pantsColor = sampleRegion(fullBody, w * 36 / 100, w * 64 / 100, h * 62 / 100, h * 86 / 100, false);
-                p.torsoBitmap = compositeCrop(p.effectiveTorsoColor(), fullBody, w * 35 / 100, h * 34 / 100, w * 30 / 100, h * 26 / 100);
-                p.armBitmap = compositeCrop(p.effectiveLeftArmColor(), fullBody, w * 23 / 100, h * 35 / 100, w * 12 / 100, h * 26 / 100);
-                p.legBitmap = compositeCrop(p.effectiveLeftLegColor(), fullBody, w * 37 / 100, h * 62 / 100, w * 26 / 100, h * 30 / 100);
+                p.torsoBitmap = solidSwatch(p.effectiveTorsoColor());
+                p.armBitmap = solidSwatch(p.effectiveLeftArmColor());
+                p.legBitmap = solidSwatch(p.effectiveLeftLegColor());
                 fullBody.recycle();
             }
             p.headFaceBitmap = compositeFace(p.headColor, faceBmp);
@@ -154,7 +156,9 @@ final class AvatarProfile {
             if (p.armBitmap == null) p.armBitmap = solidSwatch(p.effectiveLeftArmColor());
             if (p.legBitmap == null) p.legBitmap = solidSwatch(p.effectiveLeftLegColor());
 
-            p.mesh3d = AvatarMesh.fetch(api, userId);
+            StringBuilder diag = new StringBuilder();
+            p.mesh3d = AvatarMesh.fetch(api, userId, diag);
+            p.statusNote = diag.length() > 0 ? diag.toString() : "ok";
             p.loadedFromRoblox = true;
             p.textureVersion++;
         } catch (Throwable ignored) {

@@ -21,7 +21,8 @@ import java.util.concurrent.*;
  * joystick. Played locally on device; cloud Save/Publish stays in the project manager.
  */
 public final class EngineActivity extends Activity {
-    private int PANEL, PANEL2, TEXT, MUTED, BORDER, ACCENT, SOFT, CANVAS;
+    private int PANEL, PANEL2, TEXT, MUTED, BORDER, ACCENT, ON_ACCENT, SOFT, CANVAS;
+    private MaterialYou m3;
     private boolean dark;
     private float ui() { return getSharedPreferences("settings", MODE_PRIVATE).getBoolean("compactUi", true) ? 0.92f : 1f; }
 
@@ -200,13 +201,16 @@ public final class EngineActivity extends Activity {
     }
 
     private void applyPalette() {
-        if (dark) {
-            PANEL = 0xff1c1f26; PANEL2 = 0xff23272f; TEXT = 0xffe8ecf4; MUTED = 0xff96a0b0;
-            BORDER = 0xff343a45; ACCENT = 0xff6f9bff; SOFT = 0xff2a3350; CANVAS = 0xff15181e;
-        } else {
-            PANEL = 0xfff1f3f7; PANEL2 = 0xffffffff; TEXT = 0xff1e2430; MUTED = 0xff5c6775;
-            BORDER = 0xffdde2ea; ACCENT = 0xff2d56e8; SOFT = 0xffe7edff; CANVAS = 0xffe9ecf2;
-        }
+        m3 = MaterialYou.resolve(this, dark);
+        PANEL = m3.surfaceLow;
+        PANEL2 = m3.surfaceContainer;
+        TEXT = m3.onSurface;
+        MUTED = m3.onSurfaceVariant;
+        BORDER = m3.outlineVariant;
+        ACCENT = m3.primary;
+        ON_ACCENT = m3.onPrimary;
+        SOFT = m3.secondaryContainer;
+        CANVAS = m3.surface;
     }
 
     // ------------------------------------------------------------------ layout
@@ -340,15 +344,16 @@ public final class EngineActivity extends Activity {
         playButtonContainer = row();
         playButtonContainer.setGravity(Gravity.CENTER_VERTICAL);
         playButtonContainer.setPadding(dp(10), 0, dp(12), 0);
-        playButtonContainer.setBackground(shape(0xff1e8e5a, 9));
+        playButtonContainer.setBackground(shape(0xff1e8e5a, 20));
         playLabel = text("Play", 11.5f, true, 0xffffffff);
         playIconView = new StudioIcon(this, "play", 0xffffffff);
         playButtonContainer.addView(playIconView, lp(dp(14), dp(14)));
         playButtonContainer.addView(playLabel, margin(dp(6), 0, -2, -2));
         playButtonContainer.setOnClickListener(v -> { if (scene.playing) stopPlay(); else startPlay(); });
         bar.addView(playButtonContainer, margin(dp(4), 0, -2, dp(32)));
-        bar.addView(iconButton("save", "Save place", () -> save(true)), lp(button, button));
-        bar.addView(iconButton("more", "More actions", () -> moreMenu(bar)), lp(button, button));
+        bar.addView(iconButton("save", "Save place", () -> save(true)), lp(dp(38), button));
+        bar.addView(iconButton("cloud", "Publish to Roblox", this::publishDialog), lp(dp(38), button));
+        bar.addView(iconButton("more", "More actions", () -> moreMenu(bar)), lp(dp(38), button));
         return bar;
     }
 
@@ -411,7 +416,7 @@ public final class EngineActivity extends Activity {
         toolStrip = row();
         toolStrip.setGravity(Gravity.CENTER_VERTICAL);
         toolStrip.setPadding(dp(4), dp(3), dp(4), dp(3));
-        toolStrip.setBackground(shape(0xe01c212c, 10));
+        toolStrip.setBackground(shape(MaterialYou.withAlpha(PANEL2, 0xEC), 18));
         int toolW = dp(44), toolH = dp(40);
         toolStrip.addView(toolButton("select", "arrow", "Select"), lp(toolW, toolH));
         toolStrip.addView(toolButton("move", "move", "Move"), lp(toolW, toolH));
@@ -474,7 +479,7 @@ public final class EngineActivity extends Activity {
      */
     private View buildFlyControls() {
         LinearLayout layer = row();
-        joystick = new JoystickView(this);
+        joystick = new JoystickView(this); joystick.setAccentColor(ACCENT);
         joystick.setContentDescription("Fly the editor camera");
         joystick.setListener((x, y) -> {
             if (scene.playing) { scene.moveX = x; scene.moveZ = y; }
@@ -482,7 +487,7 @@ public final class EngineActivity extends Activity {
         });
         layer.setGravity(Gravity.BOTTOM);
         layer.addView(joystick, lp(dp(94), dp(94)));
-        liftPad = new JoystickView(this);
+        liftPad = new JoystickView(this); liftPad.setAccentColor(ACCENT);
         liftPad.setContentDescription("Camera up and down");
         liftPad.setListener((x, y) -> { if (!scene.playing) scene.flyUp = y; });
         layer.addView(liftPad, margin(dp(8), 0, dp(42), dp(94)));
@@ -1072,6 +1077,8 @@ public final class EngineActivity extends Activity {
             case "MeshPart": meshRows(node); break;
             case "Script": case "LocalScript": case "ModuleScript": scriptRows(node); break;
             case "ScreenGui": case "Frame": case "TextLabel": case "TextButton": guiRows(node); break;
+            case "Humanoid": humanoidRows(node); break;
+            case "Player": playerRows(node); break;
             default: break;
         }
         if (node.isRenderable()) basePartRows(node);
@@ -1268,6 +1275,22 @@ public final class EngineActivity extends Activity {
         propertyList.addView(checkRow("Disabled", node.getBool("Disabled", false), checked -> { scene.setProperty(node, "Disabled", checked); afterEdit(); }));
         String srcText = node.getString("Source", "");
         propertyList.addView(readonlyRow("Length", srcText.length() + " chars"));
+    }
+
+    private void humanoidRows(Instance node) {
+        propertyList.addView(sectionLabel("Humanoid"));
+        propertyList.addView(numberRow("WalkSpeed", node.getNumber("WalkSpeed", scene.walkSpeed), value -> { scene.setProperty(node, "WalkSpeed", value); afterEdit(); }));
+        propertyList.addView(numberRow("JumpPower", node.getNumber("JumpPower", scene.jumpPower), value -> { scene.setProperty(node, "JumpPower", value); afterEdit(); }));
+        propertyList.addView(numberRow("Health", node.getNumber("Health", scene.charHealth), value -> { scene.setProperty(node, "Health", value); afterEdit(); }));
+        propertyList.addView(numberRow("MaxHealth", node.getNumber("MaxHealth", scene.charMaxHealth), value -> { scene.setProperty(node, "MaxHealth", value); afterEdit(); }));
+        propertyList.addView(readonlyRow("RigType", node.getString("RigType", scene.avatar != null && !scene.avatar.isR15 ? "R6" : "R15")));
+    }
+
+    private void playerRows(Instance node) {
+        propertyList.addView(sectionLabel("Player"));
+        propertyList.addView(readonlyRow("DisplayName", node.getString("DisplayName", node.name)));
+        propertyList.addView(readonlyRow("UserId", String.valueOf(node.props.containsKey("UserId") ? node.props.get("UserId") : 0)));
+        propertyList.addView(checkRow("Neutral", node.getBool("Neutral", true), checked -> { scene.setProperty(node, "Neutral", checked); afterEdit(); }));
     }
 
     private void guiRows(Instance node) {
@@ -1705,7 +1728,7 @@ public final class EngineActivity extends Activity {
         if (liftPad != null) liftPad.setVisibility(View.GONE);
         flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Stop");
-        if (playButtonContainer != null) playButtonContainer.setBackground(shape(0xffd13b3b, 9));
+        if (playButtonContainer != null) playButtonContainer.setBackground(shape(0xffd13b3b, 20));
         if (playIconView != null) {
             playButtonContainer.removeView(playIconView);
             playIconView = new StudioIcon(this, "stop", 0xffffffff);
@@ -1713,6 +1736,7 @@ public final class EngineActivity extends Activity {
         }
         subtitle.setText("Playing locally — scripts & StarterGui active");
         scene.refreshCache();
+        buildTree();
         rebuildPlayGui();
         uiHandler.removeCallbacks(healthPoll);
         uiHandler.post(healthPoll);
@@ -1728,7 +1752,7 @@ public final class EngineActivity extends Activity {
         if (liftPad != null) liftPad.setVisibility(View.VISIBLE);
         flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Play");
-        if (playButtonContainer != null) playButtonContainer.setBackground(shape(0xff1e8e5a, 9));
+        if (playButtonContainer != null) playButtonContainer.setBackground(shape(0xff1e8e5a, 20));
         if (playIconView != null) {
             playButtonContainer.removeView(playIconView);
             playIconView = new StudioIcon(this, "play", 0xffffffff);
@@ -1749,6 +1773,8 @@ public final class EngineActivity extends Activity {
         menu.getMenu().add(explorerPanel != null && explorerPanel.getVisibility() == View.VISIBLE ? "Hide Explorer" : "Show Explorer");
         menu.getMenu().add(propertiesPanel != null && propertiesPanel.getVisibility() == View.VISIBLE ? "Hide Properties" : "Show Properties");
         menu.getMenu().add(snap ? "Grid snapping: on" : "Grid snapping: off");
+        menu.getMenu().add(scene.classicBaseplate ? "Baseplate: Classic Studs" : "Baseplate: Modern 2021");
+        menu.getMenu().add("Publish to Roblox…");
         menu.getMenu().add("Engine limits…");
         menu.setOnMenuItemClickListener(item -> {
             String label = item.getTitle().toString();
@@ -1760,6 +1786,12 @@ public final class EngineActivity extends Activity {
             else if (label.endsWith("Explorer")) togglePanel(explorerPanel, explorerSeparator);
             else if (label.endsWith("Properties")) togglePanel(propertiesPanel, propertiesSeparator);
             else if (label.startsWith("Grid snapping")) snapMenu();
+            else if (label.startsWith("Baseplate:")) {
+                scene.classicBaseplate = !scene.classicBaseplate;
+                scene.markDirty();
+                Toast.makeText(this, scene.classicBaseplate ? "Classic Studs Baseplate" : "Modern Baseplate 2021", Toast.LENGTH_SHORT).show();
+            }
+            else if (label.startsWith("Publish to Roblox")) publishDialog();
             else if (label.startsWith("Engine limits")) limitsDialog();
             return true;
         });
@@ -1787,6 +1819,104 @@ public final class EngineActivity extends Activity {
                         + (textureNote.isEmpty() ? "" : "\n\n" + textureNote)
                         + (viewport == null || viewport.postNote().isEmpty() ? "" : "\n\n" + viewport.postNote()))
                 .setPositiveButton("Got it", null).show();
+    }
+
+    private void publishDialog() {
+        if (loading || loadError != null || scene.root == null) return;
+        android.content.SharedPreferences sp = getSharedPreferences("settings", MODE_PRIVATE);
+        long defaultUniverse = sp.getLong("lastPubUniverse", 0);
+        long defaultPlace = sp.getLong("lastPubPlace", 0);
+        if (folderUri != null && placeId != null) {
+            try {
+                ManagedProjects repo = new ManagedProjects(this, new ProjectStore(this));
+                ManagedProjects.Record rec = repo.load(folderUri);
+                long cu = rec.data.optJSONObject("cloud").optLong("universe_id", 0);
+                if (cu > 0) defaultUniverse = cu;
+                for (int i = 0; i < rec.places().length(); i++) {
+                    JSONObject pl = rec.places().getJSONObject(i);
+                    if (placeId.equals(pl.optString("id"))) {
+                        long cp = pl.optLong("cloud_place_id", 0);
+                        if (cp > 0) defaultPlace = cp;
+                        break;
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }
+        LinearLayout box = col();
+        box.setPadding(dp(20), dp(12), dp(20), dp(4));
+        box.addView(text("Universe ID", 11, true, MUTED));
+        EditText uField = input(defaultUniverse > 0 ? String.valueOf(defaultUniverse) : "");
+        uField.setHint("e.g. 1234567890");
+        uField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        box.addView(uField, margin(0, dp(4), -1, dp(38)));
+        box.addView(text("Place ID", 11, true, MUTED), margin(0, dp(10), -1, -2));
+        EditText pField = input(defaultPlace > 0 ? String.valueOf(defaultPlace) : "");
+        pField.setHint("e.g. 9876543210");
+        pField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        box.addView(pField, margin(0, dp(4), -1, dp(38)));
+        box.addView(hintText("Saves your latest edits locally, then uploads directly to Roblox Open Cloud using your connected API key (requires universe-places:write)."));
+
+        new AlertDialog.Builder(this)
+                .setTitle("Publish to Roblox")
+                .setView(box)
+                .setNegativeButton("Cancel", null)
+                .setNeutralButton("Save Cloud Version", (d, w) -> runPublish(uField.getText().toString(), pField.getText().toString(), false))
+                .setPositiveButton("Publish Live", (d, w) -> runPublish(uField.getText().toString(), pField.getText().toString(), true))
+                .show();
+    }
+
+    private void runPublish(String uStr, String pStr, final boolean publishLive) {
+        final long universeId, targetPlaceId;
+        try {
+            universeId = Long.parseLong(uStr.trim());
+            targetPlaceId = Long.parseLong(pStr.trim());
+            if (universeId <= 0 || targetPlaceId <= 0) throw new NumberFormatException();
+        } catch (Exception e) {
+            Toast.makeText(this, "Enter valid numeric Universe ID and Place ID", Toast.LENGTH_LONG).show();
+            return;
+        }
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+                .putLong("lastPubUniverse", universeId)
+                .putLong("lastPubPlace", targetPlaceId)
+                .apply();
+        final String xml;
+        try { xml = PlaceWriter.generate(scene.root); }
+        catch (Exception e) { Toast.makeText(this, "Export failed: " + RobloxApi.safe(e), Toast.LENGTH_LONG).show(); return; }
+
+        final ProgressDialog prog = new ProgressDialog(this);
+        prog.setMessage(publishLive ? "Publishing live to Roblox…" : "Saving cloud version to Roblox…");
+        prog.setCancelable(false);
+        prog.show();
+        worker.execute(() -> {
+            File tmp = null;
+            try {
+                String key = new CredentialVault(this).load();
+                if (key == null || key.isEmpty()) throw new IOException("No Roblox API key connected. Connect your key on the home screen first.");
+                RobloxApi.Session s = new RobloxApi().login(key);
+                byte[] bytes = xml.getBytes("UTF-8");
+                if (placeUri != null) {
+                    try { write(bytes); updateManifest(bytes); } catch (Throwable ignored) { }
+                }
+                tmp = File.createTempFile("publish-", ".rbxlx", getCacheDir());
+                try (FileOutputStream fos = new FileOutputStream(tmp)) { fos.write(bytes); }
+                PublishService.Result res = PublishService.upload(s, universeId, targetPlaceId, tmp, publishLive);
+                runOnUiThread(() -> {
+                    prog.dismiss();
+                    String msg = res.type + " version " + res.version + " to Universe " + universeId + " / Place " + targetPlaceId;
+                    scene.logOutput("info", msg);
+                    new AlertDialog.Builder(this).setTitle("Roblox Upload Confirmed").setMessage(msg).setPositiveButton("Awesome", null).show();
+                });
+            } catch (Throwable err) {
+                final String msg = RobloxApi.safe(err);
+                runOnUiThread(() -> {
+                    prog.dismiss();
+                    scene.logOutput("error", "Publish failed: " + msg);
+                    new AlertDialog.Builder(this).setTitle("Publish Failed").setMessage(msg).setPositiveButton("OK", null).show();
+                });
+            } finally {
+                if (tmp != null) tmp.delete();
+            }
+        });
     }
 
     private void save(boolean notify) {
@@ -1911,7 +2041,7 @@ public final class EngineActivity extends Activity {
     private View roundButton(String label, Runnable action) {
         TextView t = text(label, 12, true, 0xffffffff);
         t.setGravity(Gravity.CENTER);
-        t.setBackground(shape(0xcc2d56e8, 40));
+        t.setBackground(shape(MaterialYou.withAlpha(ACCENT, 0xDD), 40));
         t.setContentDescription(label);
         t.setOnClickListener(v -> action.run());
         return t;

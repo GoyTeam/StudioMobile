@@ -16,6 +16,7 @@ final class JoystickView extends View {
     private Listener listener;
     private float knobX, knobY;
     private boolean active;
+    private int accentColor = 0xFF4F7DFF;
 
     JoystickView(Context context) {
         super(context);
@@ -31,6 +32,7 @@ final class JoystickView extends View {
     }
 
     void setListener(Listener listener) { this.listener = listener; }
+    void setAccentColor(int color) { this.accentColor = color; knob.setColor(MaterialYou.withAlpha(color, 0xCC)); invalidate(); }
 
     private float dp(float v) { return v * getResources().getDisplayMetrics().density; }
 
@@ -40,7 +42,7 @@ final class JoystickView extends View {
         float radius = Math.min(w, h) / 2f - dp(4);
         if (radius <= 2) return;
         base.setColor(active ? 0x661A2233 : 0x3D141821);
-        rim.setColor(active ? 0xAA6F9BFF : 0x55DCE4F2);
+        rim.setColor(active ? MaterialYou.withAlpha(accentColor, 0xCC) : 0x55DCE4F2);
         canvas.drawCircle(cx, cy, radius, base);
         canvas.drawCircle(cx, cy, radius, rim);
         float kx = cx + knobX * (radius * 0.65f), ky = cy + knobY * (radius * 0.65f);
