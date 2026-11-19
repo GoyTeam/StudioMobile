@@ -56,7 +56,11 @@ final class EngineScene {
     private boolean wasOnGround = false;
     private Instance standingPart;
     private final double[] standingPartPrev = new double[3];
-    private final HashMap<Instance, Double> partVelY = new HashMap<>();
+    private final HashMap<Instance, double[]> partVel = new HashMap<>();
+    volatile String humanoidState = "Running";
+    double jumpHeight = 7.2;
+    boolean useJumpPower = true;
+    double maxSlopeAngle = 89.0;
     Instance livePlayer, liveCharacter, liveHumanoid, liveRootPart;
     volatile double moveX, moveZ;
     volatile boolean jumpQueued;
@@ -397,7 +401,7 @@ final class EngineScene {
         jumpBufferTimer = 0;
         wasOnGround = false;
         standingPart = null;
-        partVelY.clear();
+        partVel.clear();
         charVel[0] = charVel[1] = charVel[2] = 0;
         moveX = moveZ = 0;
         onGround = false;
@@ -502,13 +506,27 @@ final class EngineScene {
         if (g instanceof Number) gravity = ((Number) g).doubleValue();
     }
 
+    /** Roblox material default physical properties: {density, friction, elasticity}. */
+    private static double[] materialPhysics(int materialEnum) {
+        switch (materialEnum) {
+            case 1536: case 1344: return new double[]{0.92, 0.04, 0.15}; // Ice / Glacier (slippery!)
+            case 1088: case 1040: case 1056: return new double[]{7.80, 0.40, 0.25}; // Metal / DiamondPlate / Foil
+            case 512:  case 528:  return new double[]{0.35, 0.48, 0.20}; // Wood / WoodPlanks
+            case 816:  case 800:  case 848: return new double[]{2.40, 0.70, 0.10}; // Concrete / Slate / Brick
+            case 1280: case 1296: return new double[]{0.70, 0.65, 0.10}; // Grass / Sand
+            case 1312: return new double[]{0.70, 0.72, 0.08}; // Fabric
+            case 288:  return new double[]{0.70, 0.30, 0.55}; // Neon / bouncy
+            default:   return new double[]{0.70, 0.30, 0.50}; // Plastic / SmoothPlastic
+        }
+    }
+
     synchronized void step(double dt) {
         if (!playing) return;
         dt = Math.min(dt, 0.05);
         idleTime += dt;
         if (landTimer > 0) landTimer = Math.max(0, landTimer - dt);
 
-        // Moving platform carry
+        // Moving platform & Roblox Conveyor Velocity carry
         if (onGround && standingPart != null && standingPart.parent != null) {
             double[] pc = standingPart.cframe();
             double dx = pc[0] - standingPartPrev[0];
@@ -522,8 +540,16 @@ final class EngineScene {
             standingPartPrev[0] = pc[0];
             standingPartPrev[1] = pc[1];
             standingPartPrev[2] = pc[2];
+            Object velObj = standingPart.props.get("AssemblyLinearVelocity");
+            if (!(velObj instanceof Instance.Vector3)) velObj = standingPart.props.get("Velocity");
+            if (velObj instanceof Instance.Vector3) {
+                Instance.Vector3 cv = (Instance.Vector3) velObj;
+                charPos[0] += cv.x * dt;
+                charPos[2] += cv.z * dt;
+            }
         }
 
+        // Roblox Humanoid input -> world wish velocity & facing (-Z is character forward)
         double speed = walkSpeed;
         double wishX = 0, wishZ = 0;
         double len = Math.min(1, Math.hypot(moveX, moveZ));
@@ -531,9 +557,16 @@ final class EngineScene {
             double cy = Math.cos(camYaw), sy = Math.sin(camYaw);
             wishX = (cy * moveX - sy * moveZ) * speed * len;
             wishZ = (-sy * moveX - cy * moveZ) * speed * len;
-            charYaw = Math.atan2(wishX, wishZ);
+            // Avatar forward is local -Z; align (-sin(yaw), -cos(yaw)) with (wishX, wishZ)
+            charYaw = Math.atan2(-wishX, -wishZ);
         }
-        double accel = onGround ? 18.0 : 8.5;
+        double surfaceFriction = 0.30;
+        if (onGround && standingPart != null) {
+            surfaceFriction = materialPhysics(standingPart.getInt("Material", 256))[1];
+        }
+        // Roblox Humanoid traction: crisp ground control, slippery on Ice, lower air control
+        double groundAccel = surfaceFriction < 0.10 ? 3.2 : 24.0;
+        double accel = onGround ? groundAccel : 7.5;
         charVel[0] += (wishX - charVel[0]) * Math.min(1.0, dt * accel);
         charVel[2] += (wishZ - charVel[2]) * Math.min(1.0, dt * accel);
         charSpeed = Math.hypot(charVel[0], charVel[2]);
@@ -547,10 +580,10 @@ final class EngineScene {
             double diff = charYaw - renderYaw;
             while (diff > Math.PI) diff -= 2 * Math.PI;
             while (diff < -Math.PI) diff += 2 * Math.PI;
-            renderYaw += diff * Math.min(1.0, dt * 14.0);
+            renderYaw += diff * Math.min(1.0, dt * 16.0);
         }
 
-        if (onGround) coyoteTimer = 0.12;
+        if (onGround) coyoteTimer = 0.10;
         else coyoteTimer = Math.max(0, coyoteTimer - dt);
 
         if (jumpQueued) {
@@ -560,24 +593,39 @@ final class EngineScene {
             jumpBufferTimer = Math.max(0, jumpBufferTimer - dt);
         }
 
-        charVel[1] -= gravity * dt;
         if (jumpBufferTimer > 0 && coyoteTimer > 0) {
-            charVel[1] = jumpPower;
+            // Official Roblox jump formula: JumpPower or sqrt(2 * Gravity * JumpHeight)
+            double v0 = useJumpPower ? jumpPower : Math.sqrt(Math.max(0, 2.0 * gravity * jumpHeight));
+            charVel[1] = v0;
             onGround = false;
             coyoteTimer = 0;
             jumpBufferTimer = 0;
             standingPart = null;
+            humanoidState = "Jumping";
         }
-        if (charVel[1] < -300) charVel[1] = -300;
 
+        // Roblox 240 Hz fixed-timestep sub-stepping (prevents tunneling on high-speed falls & jumps)
         touchedNow.clear();
         wasOnGround = onGround;
-        onGround = false;
-        standingPart = null;
-        moveAxis(0, charVel[0] * dt);
-        moveAxis(2, charVel[2] * dt);
-        moveAxis(1, charVel[1] * dt);
-        if (onGround && !wasOnGround) landTimer = 0.18;
+        int substeps = Math.max(1, Math.min(12, (int) Math.ceil(dt * 240.0)));
+        double subDt = dt / substeps;
+        for (int s = 0; s < substeps; s++) {
+            charVel[1] -= gravity * subDt;
+            if (charVel[1] < -350.0) charVel[1] = -350.0;
+            onGround = false;
+            standingPart = null;
+            moveAxis(0, charVel[0] * subDt);
+            moveAxis(2, charVel[2] * subDt);
+            moveAxis(1, charVel[1] * subDt);
+        }
+        if (onGround && !wasOnGround) {
+            landTimer = 0.16;
+            humanoidState = "Landed";
+        } else if (!onGround) {
+            humanoidState = charVel[1] > 1.0 ? "Jumping" : "Freefall";
+        } else {
+            humanoidState = charSpeed > 0.35 ? "Running" : "Idle";
+        }
 
         stepDynamicParts(dt);
 
@@ -595,37 +643,67 @@ final class EngineScene {
             liveHumanoid.props.put("Health", charHealth);
             liveHumanoid.props.put("WalkSpeed", walkSpeed);
             liveHumanoid.props.put("JumpPower", jumpPower);
+            liveHumanoid.props.put("JumpHeight", jumpHeight);
+            liveHumanoid.props.put("MaxSlopeAngle", maxSlopeAngle);
         }
         if (charPos[1] < -150) respawnCharacter();
     }
 
     private void stepDynamicParts(double dt) {
         boolean anyMoved = false;
+        double[] charBox = {charPos[0], charPos[1], charPos[2], charHx + 0.15, charHy, charHz + 0.15};
         for (int i = 0; i < renderList.size(); i++) {
             Instance part = renderList.get(i);
             if (part.getBool("Anchored", true)) continue;
             if ("SpawnLocation".equals(part.className)) continue;
-            double vy = partVelY.containsKey(part) ? partVelY.get(part) : 0.0;
-            vy = Math.max(-220.0, vy - gravity * dt);
+            double[] v = partVel.get(part);
+            if (v == null) { v = new double[]{0, 0, 0}; partVel.put(part, v); }
+            double[] phys = materialPhysics(part.getInt("Material", 256));
+            double density = phys[0], friction = phys[1], elasticity = phys[2];
             double[] c = part.cframe();
             double[] s = part.size();
-            double halfY = Math.abs(s[1]) * 0.5;
-            double nextY = c[1] + vy * dt;
-            double[] boxSelf = {c[0], nextY, c[2], Math.abs(s[0]) * 0.5, halfY, Math.abs(s[2]) * 0.5};
+            double hx = Math.abs(s[0]) * 0.5, hy = Math.abs(s[1]) * 0.5, hz = Math.abs(s[2]) * 0.5;
+            double mass = Math.max(0.5, Math.abs(s[0] * s[1] * s[2]) * density);
+
+            // Player-to-part momentum push (mass-weighted like Roblox assemblies)
+            double[] pBox = {c[0], c[1], c[2], hx, hy, hz};
+            if (overlaps(charBox, pBox) && charSpeed > 0.5) {
+                double push = Math.min(1.0, 12.0 / (mass + 8.0));
+                v[0] += (charVel[0] - v[0]) * push * 0.45;
+                v[2] += (charVel[2] - v[2]) * push * 0.45;
+            }
+
+            v[1] = Math.max(-250.0, v[1] - gravity * dt);
+            double nx = c[0] + v[0] * dt;
+            double ny = c[1] + v[1] * dt;
+            double nz = c[2] + v[2] * dt;
+            boolean grounded = false;
+            double[] boxNext = {nx, ny, nz, hx, hy, hz};
             for (int j = 0; j < colliders.size(); j++) {
                 if (colliderOwners.get(j) == part) continue;
                 double[] other = colliders.get(j);
-                if (overlaps(boxSelf, other) && vy < 0 && c[1] >= other[1]) {
-                    nextY = other[1] + other[4] + halfY;
-                    vy = 0;
+                if (overlaps(boxNext, other) && v[1] < 0 && c[1] >= other[1]) {
+                    ny = other[1] + other[4] + hy;
+                    if (Math.abs(v[1]) > 8.0 && elasticity > 0.15) {
+                        v[1] = -v[1] * elasticity * 0.55;
+                    } else {
+                        v[1] = 0;
+                        grounded = true;
+                    }
                     break;
                 }
             }
-            if (Math.abs(nextY - c[1]) > 1e-4) {
-                part.setPosition(c[0], nextY, c[2]);
+            if (grounded) {
+                double drag = Math.max(0.0, 1.0 - friction * 14.0 * dt);
+                v[0] *= drag;
+                v[2] *= drag;
+                if (Math.abs(v[0]) < 0.05) v[0] = 0;
+                if (Math.abs(v[2]) < 0.05) v[2] = 0;
+            }
+            if (Math.abs(nx - c[0]) + Math.abs(ny - c[1]) + Math.abs(nz - c[2]) > 1e-4) {
+                part.setPosition(nx, ny, nz);
                 anyMoved = true;
             }
-            partVelY.put(part, vy);
         }
         if (anyMoved) markDirty();
     }

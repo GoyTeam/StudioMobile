@@ -7,16 +7,55 @@ import java.net.URL;
 import java.util.*;
 
 final class AvatarMesh {
+    static final int PART_HEAD        = 0;
+    static final int PART_UPPER_TORSO = 1;
+    static final int PART_LOWER_TORSO = 2;
+    static final int PART_L_UPPER_ARM = 3;
+    static final int PART_L_LOWER_ARM = 4;
+    static final int PART_R_UPPER_ARM = 5;
+    static final int PART_R_LOWER_ARM = 6;
+    static final int PART_L_UPPER_LEG = 7;
+    static final int PART_L_LOWER_LEG = 8;
+    static final int PART_R_UPPER_LEG = 9;
+    static final int PART_R_LOWER_LEG = 10;
+
+    static final float[][] PART_PIVOTS = {
+        { 0.00f, 4.00f, 0.00f}, // 0 HEAD
+        { 0.00f, 2.55f, 0.00f}, // 1 UPPER_TORSO
+        { 0.00f, 2.00f, 0.00f}, // 2 LOWER_TORSO
+        {-1.50f, 3.85f, 0.00f}, // 3 L_UPPER_ARM
+        {-1.50f, 2.95f, 0.00f}, // 4 L_LOWER_ARM
+        { 1.50f, 3.85f, 0.00f}, // 5 R_UPPER_ARM
+        { 1.50f, 2.95f, 0.00f}, // 6 R_LOWER_ARM
+        {-0.50f, 1.98f, 0.00f}, // 7 L_UPPER_LEG
+        {-0.50f, 1.00f, 0.00f}, // 8 L_LOWER_LEG
+        { 0.50f, 1.98f, 0.00f}, // 9 R_UPPER_LEG
+        { 0.50f, 1.00f, 0.00f}  // 10 R_LOWER_LEG
+    };
+
+    static int classifyTriangle(float cx, float cy, float cz) {
+        if (cy >= 3.92f) return PART_HEAD;
+        if (cy >= 1.96f) {
+            if (cx < -1.03f) return cy >= 2.95f ? PART_L_UPPER_ARM : PART_L_LOWER_ARM;
+            if (cx >  1.03f) return cy >= 2.95f ? PART_R_UPPER_ARM : PART_R_LOWER_ARM;
+            return cy >= 2.55f ? PART_UPPER_TORSO : PART_LOWER_TORSO;
+        }
+        if (cx <= 0.0f) return cy >= 1.00f ? PART_L_UPPER_LEG : PART_L_LOWER_LEG;
+        return cy >= 1.00f ? PART_R_UPPER_LEG : PART_R_LOWER_LEG;
+    }
+
     static final class SubMesh {
         final String materialName;
+        final int partId;
         final float[] positions;
         final float[] normals;
         final float[] uvs;
         final int vertexCount;
         final Bitmap texture;
 
-        SubMesh(String materialName, float[] positions, float[] normals, float[] uvs, int vertexCount, Bitmap texture) {
+        SubMesh(String materialName, int partId, float[] positions, float[] normals, float[] uvs, int vertexCount, Bitmap texture) {
             this.materialName = materialName;
+            this.partId = partId;
             this.positions = positions;
             this.normals = normals;
             this.uvs = uvs;
@@ -320,19 +359,6 @@ final class AvatarMesh {
             Bucket b = entry.getValue();
             int vc = b.pos.size() / 3;
             if (vc < 3) continue;
-            float[] posArr = new float[b.pos.size()];
-            float[] normArr = new float[b.norm.size()];
-            float[] uvArr = new float[b.uv.size()];
-            for (int i = 0; i < vc; i++) {
-                posArr[i * 3] = (b.pos.get(i * 3) - cx) * scale;
-                posArr[i * 3 + 1] = (b.pos.get(i * 3 + 1) - minY) * scale;
-                posArr[i * 3 + 2] = (b.pos.get(i * 3 + 2) - cz) * scale;
-                normArr[i * 3] = b.norm.get(i * 3);
-                normArr[i * 3 + 1] = b.norm.get(i * 3 + 1);
-                normArr[i * 3 + 2] = b.norm.get(i * 3 + 2);
-                uvArr[i * 2] = b.uv.get(i * 2);
-                uvArr[i * 2 + 1] = b.uv.get(i * 2 + 1);
-            }
             Bitmap tex = defaultTex;
             String hash = mtlTexHashes.get(entry.getKey());
             if (hash != null && !hash.isEmpty()) {
@@ -343,8 +369,48 @@ final class AvatarMesh {
                 }
                 if (cached != null) tex = cached;
             }
-            subMeshes.add(new SubMesh(entry.getKey(), posArr, normArr, uvArr, vc, tex));
-            totalVerts += vc;
+            // Partition triangles into the 11 articulated Roblox body-part buckets
+            Bucket[] parts = new Bucket[PART_PIVOTS.length];
+            int triCount = vc / 3;
+            for (int t = 0; t < triCount; t++) {
+                int i0 = t * 3, i1 = i0 + 1, i2 = i0 + 2;
+                float x0 = (b.pos.get(i0 * 3) - cx) * scale, y0 = (b.pos.get(i0 * 3 + 1) - minY) * scale, z0 = (b.pos.get(i0 * 3 + 2) - cz) * scale;
+                float x1 = (b.pos.get(i1 * 3) - cx) * scale, y1 = (b.pos.get(i1 * 3 + 1) - minY) * scale, z1 = (b.pos.get(i1 * 3 + 2) - cz) * scale;
+                float x2 = (b.pos.get(i2 * 3) - cx) * scale, y2 = (b.pos.get(i2 * 3 + 1) - minY) * scale, z2 = (b.pos.get(i2 * 3 + 2) - cz) * scale;
+                int pid = classifyTriangle((x0 + x1 + x2) / 3f, (y0 + y1 + y2) / 3f, (z0 + z1 + z2) / 3f);
+                if (parts[pid] == null) parts[pid] = new Bucket();
+                Bucket pb = parts[pid];
+                int[] idxs = {i0, i1, i2};
+                float[][] xyz = {{x0, y0, z0}, {x1, y1, z1}, {x2, y2, z2}};
+                for (int k = 0; k < 3; k++) {
+                    pb.pos.add(xyz[k][0]); pb.pos.add(xyz[k][1]); pb.pos.add(xyz[k][2]);
+                    pb.norm.add(b.norm.get(idxs[k] * 3));
+                    pb.norm.add(b.norm.get(idxs[k] * 3 + 1));
+                    pb.norm.add(b.norm.get(idxs[k] * 3 + 2));
+                    pb.uv.add(b.uv.get(idxs[k] * 2));
+                    pb.uv.add(b.uv.get(idxs[k] * 2 + 1));
+                }
+            }
+            for (int pid = 0; pid < parts.length; pid++) {
+                Bucket pb = parts[pid];
+                if (pb == null || pb.pos.size() < 9) continue;
+                int pvc = pb.pos.size() / 3;
+                float[] posArr = new float[pb.pos.size()];
+                float[] normArr = new float[pb.norm.size()];
+                float[] uvArr = new float[pb.uv.size()];
+                for (int i = 0; i < pvc; i++) {
+                    posArr[i * 3] = pb.pos.get(i * 3);
+                    posArr[i * 3 + 1] = pb.pos.get(i * 3 + 1);
+                    posArr[i * 3 + 2] = pb.pos.get(i * 3 + 2);
+                    normArr[i * 3] = pb.norm.get(i * 3);
+                    normArr[i * 3 + 1] = pb.norm.get(i * 3 + 1);
+                    normArr[i * 3 + 2] = pb.norm.get(i * 3 + 2);
+                    uvArr[i * 2] = pb.uv.get(i * 2);
+                    uvArr[i * 2 + 1] = pb.uv.get(i * 2 + 1);
+                }
+                subMeshes.add(new SubMesh(entry.getKey(), pid, posArr, normArr, uvArr, pvc, tex));
+                totalVerts += pvc;
+            }
         }
         if (subMeshes.isEmpty()) return null;
         return new AvatarMesh(subMeshes, totalVerts, subMeshes.size() + " mats, " + totalVerts + " verts");

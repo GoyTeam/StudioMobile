@@ -678,20 +678,9 @@ public final class EngineActivity extends Activity {
         rigPill.setBackground(shape(0xff5b3ee8, 8));
         rigPill.setOnClickListener(v -> {
             if (scene.avatar == null) scene.avatar = AvatarProfile.defaultAvatar();
-            if (scene.use3dAvatar && scene.avatar.mesh3d != null) {
-                scene.use3dAvatar = false;
-                scene.avatar.isR15 = true;
-                rigPill.setText("R15");
-            } else if (scene.avatar.isR15) {
-                scene.use3dAvatar = false;
-                scene.avatar.isR15 = false;
-                rigPill.setText("R6");
-            } else {
-                scene.use3dAvatar = scene.avatar.mesh3d != null;
-                scene.avatar.isR15 = !scene.use3dAvatar;
-                rigPill.setText(scene.use3dAvatar ? "3D" : "R15");
-            }
-            scene.logOutput("info", "Avatar mode: " + rigPill.getText());
+            scene.avatar.isR15 = !scene.avatar.isR15;
+            rigPill.setText(scene.avatar.isR15 ? "R15" : "R6");
+            scene.logOutput("info", "Avatar rig: " + rigPill.getText());
         });
         hudRow.addView(rigPill, margin(dp(8), 0, -2, -2));
         camModePill = text("3P", 10.5f, true, 0xffffffff);
@@ -947,10 +936,10 @@ public final class EngineActivity extends Activity {
                 if (uid > 0) {
                     AvatarProfile av = AvatarProfile.fetchForUser(api, apiKey, uid, uname);
                     scene.avatar = av;
-                    scene.use3dAvatar = av.mesh3d != null;
+                    scene.use3dAvatar = true;
                     scene.logOutput("info", av.statusSummary());
                     runOnUiThread(() -> {
-                        if (rigPill != null) rigPill.setText(scene.use3dAvatar ? "3D" : (av.isR15 ? "R15" : "R6"));
+                        if (rigPill != null) rigPill.setText(av.isR15 ? "R15" : "R6");
                     });
                 }
             } catch (Throwable ignored) { }

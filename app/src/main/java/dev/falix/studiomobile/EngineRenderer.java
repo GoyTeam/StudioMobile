@@ -273,7 +273,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private int avatarProgram, avPos, avNorm, avUv, avMvp, avNormal, avTex, avHasTex, avSunDir, avSunColor, avSunGain, avAmbient;
     private static final class GlSubMesh {
         FloatBuffer pos, norm, uv;
-        int tex, count;
+        int tex, count, partId;
     }
     private AvatarMesh uploadedAvatarMesh;
     private final ArrayList<GlSubMesh> glAvatarParts = new ArrayList<>();
@@ -935,7 +935,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             double[] p = scene.charPos;
             double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
             float cosYaw = (float) Math.cos(yaw), sinYaw = (float) Math.sin(yaw);
-            if (!glAvatarParts.isEmpty() && scene.use3dAvatar) {
+            if (!glAvatarParts.isEmpty()) {
                 double[] cc = {p[0], p[1] - scene.charHy, p[2], cosYaw, 0, sinYaw, 0, 1, 0, -sinYaw, 0, cosYaw};
                 setModel(cc, 1f, 1f, 1f);
                 Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
@@ -1332,6 +1332,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             g.uv = floatBuffer(sm.uvs);
             g.count = sm.vertexCount;
             g.tex = sm.texture != null ? uploadBitmapTex(0, sm.texture) : 0;
+            g.partId = sm.partId;
             glAvatarParts.add(g);
         }
     }
@@ -1341,25 +1342,14 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         if (uIsBaseplate >= 0) GLES20.glUniform1f(uIsBaseplate, 0f);
         AvatarProfile av = scene.avatar != null ? scene.avatar : AvatarProfile.defaultAvatar();
         ensureAvatarMeshUploaded();
-        if (scene.use3dAvatar && !glAvatarParts.isEmpty()) {
+        if (!glAvatarParts.isEmpty()) {
             double[] p = scene.charPos;
             double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
-            float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
-            float speedFrac = (float) Math.min(1.0, scene.charSpeed / Math.max(1.0, scene.walkSpeed));
-            float bob = scene.onGround ? Math.abs((float) Math.sin(scene.charWalkPhase)) * 0.16f * speedFrac : 0f;
-            float roll = scene.onGround ? (float) Math.sin(scene.charWalkPhase) * 0.045f * speedFrac : 0f;
-            float cr = (float) Math.cos(roll), sr = (float) Math.sin(roll);
-            double[] c = {
-                p[0], p[1] - scene.charHy + bob, p[2],
-                cy * cr, -cy * sr, sy,
-                sr, cr, 0,
-                -sy * cr, sy * sr, cy
-            };
-            setModel(c, 1f, 1f, 1f);
+            RobloxAnimations.Pose pose = RobloxAnimations.evaluate(
+                    av.isR15, scene.onGround, scene.charSpeed, scene.walkSpeed,
+                    scene.idleTime, scene.charVel[1]);
             GLES20.glDisable(GLES20.GL_CULL_FACE);
             GLES20.glUseProgram(avatarProgram);
-            GLES20.glUniformMatrix4fv(avMvp, 1, false, mMvp, 0);
-            GLES20.glUniformMatrix3fv(avNormal, 1, false, normal3, 0);
             GLES20.glUniform3f(avSunDir, (float) light.sunDirection[0], (float) light.sunDirection[1], (float) light.sunDirection[2]);
             GLES20.glUniform3f(avSunColor, (float) light.sunColor[0], (float) light.sunColor[1], (float) light.sunColor[2]);
             GLES20.glUniform1f(avSunGain, (float) light.sunGain);
@@ -1369,6 +1359,9 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             if (avNorm >= 0) GLES20.glEnableVertexAttribArray(avNorm);
             if (avUv >= 0) GLES20.glEnableVertexAttribArray(avUv);
             for (GlSubMesh sub : glAvatarParts) {
+                setRiggedSubMeshModel(p, yaw, av.isR15, pose, sub.partId);
+                GLES20.glUniformMatrix4fv(avMvp, 1, false, mMvp, 0);
+                GLES20.glUniformMatrix3fv(avNormal, 1, false, normal3, 0);
                 if (sub.tex != 0) { bindTexture(0, sub.tex); GLES20.glUniform1f(avHasTex, 1f); }
                 else GLES20.glUniform1f(avHasTex, 0f);
                 GLES20.glVertexAttribPointer(avPos, 3, GLES20.GL_FLOAT, false, 0, sub.pos);
@@ -1434,6 +1427,108 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float uLegH = 0.98f * hs, lLegH = 0.98f * hs;
         drawTexturedChain(p, cy, sy, -legX, hipY, 0, pose.lUpperLegX, pose.lUpperLegX + pose.lLowerLegX, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
         drawTexturedChain(p, cy, sy, legX, hipY, 0, pose.rUpperLegX, pose.rUpperLegX + pose.rLowerLegX, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
+    }
+
+    private void setRiggedSubMeshModel(double[] origin, double baseYaw, boolean isR15,
+                                       RobloxAnimations.Pose pose, int partId) {
+        float px = 0f, py = 2.0f, pz = 0f;
+        float pitchX = 0f;
+        double partYaw = baseYaw;
+        float extraY = pose.bobY;
+        float extraZ = 0f;
+
+        if (partId == AvatarMesh.PART_HEAD) {
+            px = 0f; py = 4.00f; pz = 0f;
+            partYaw = baseYaw + pose.headYaw;
+            pitchX = pose.headPitch;
+        } else if (partId == AvatarMesh.PART_UPPER_TORSO) {
+            px = 0f; py = 2.55f; pz = 0f;
+            partYaw = baseYaw + pose.torsoYaw;
+            pitchX = pose.torsoPitch;
+        } else if (partId == AvatarMesh.PART_LOWER_TORSO) {
+            px = 0f; py = 2.00f; pz = 0f;
+            partYaw = baseYaw + (isR15 ? pose.torsoYaw * 0.4f : pose.torsoYaw);
+            pitchX = isR15 ? pose.torsoPitch * 0.5f : pose.torsoPitch;
+        } else if (partId == AvatarMesh.PART_L_UPPER_ARM) {
+            px = -1.50f; py = 3.85f; pz = 0f;
+            partYaw = baseYaw + pose.torsoYaw;
+            pitchX = pose.lUpperArmX;
+        } else if (partId == AvatarMesh.PART_L_LOWER_ARM) {
+            partYaw = baseYaw + pose.torsoYaw;
+            if (!isR15) {
+                px = -1.50f; py = 3.85f; pz = 0f;
+                pitchX = pose.lUpperArmX;
+            } else {
+                px = -1.50f; py = 2.95f; pz = 0f;
+                float uLen = 0.90f;
+                extraY += (3.85f - uLen * (float) Math.cos(pose.lUpperArmX)) - 2.95f;
+                extraZ += -uLen * (float) Math.sin(pose.lUpperArmX);
+                pitchX = pose.lUpperArmX + pose.lLowerArmX;
+            }
+        } else if (partId == AvatarMesh.PART_R_UPPER_ARM) {
+            px = 1.50f; py = 3.85f; pz = 0f;
+            partYaw = baseYaw + pose.torsoYaw;
+            pitchX = pose.rUpperArmX;
+        } else if (partId == AvatarMesh.PART_R_LOWER_ARM) {
+            partYaw = baseYaw + pose.torsoYaw;
+            if (!isR15) {
+                px = 1.50f; py = 3.85f; pz = 0f;
+                pitchX = pose.rUpperArmX;
+            } else {
+                px = 1.50f; py = 2.95f; pz = 0f;
+                float uLen = 0.90f;
+                extraY += (3.85f - uLen * (float) Math.cos(pose.rUpperArmX)) - 2.95f;
+                extraZ += -uLen * (float) Math.sin(pose.rUpperArmX);
+                pitchX = pose.rUpperArmX + pose.rLowerArmX;
+            }
+        } else if (partId == AvatarMesh.PART_L_UPPER_LEG) {
+            px = -0.50f; py = 1.98f; pz = 0f;
+            pitchX = pose.lUpperLegX;
+        } else if (partId == AvatarMesh.PART_L_LOWER_LEG) {
+            if (!isR15) {
+                px = -0.50f; py = 1.98f; pz = 0f;
+                pitchX = pose.lUpperLegX;
+            } else {
+                px = -0.50f; py = 1.00f; pz = 0f;
+                float uLen = 0.98f;
+                extraY += (1.98f - uLen * (float) Math.cos(pose.lUpperLegX)) - 1.00f;
+                extraZ += -uLen * (float) Math.sin(pose.lUpperLegX);
+                pitchX = pose.lUpperLegX + pose.lLowerLegX;
+            }
+        } else if (partId == AvatarMesh.PART_R_UPPER_LEG) {
+            px = 0.50f; py = 1.98f; pz = 0f;
+            pitchX = pose.rUpperLegX;
+        } else if (partId == AvatarMesh.PART_R_LOWER_LEG) {
+            if (!isR15) {
+                px = 0.50f; py = 1.98f; pz = 0f;
+                pitchX = pose.rUpperLegX;
+            } else {
+                px = 0.50f; py = 1.00f; pz = 0f;
+                float uLen = 0.98f;
+                extraY += (1.98f - uLen * (float) Math.cos(pose.rUpperLegX)) - 1.00f;
+                extraZ += -uLen * (float) Math.sin(pose.rUpperLegX);
+                pitchX = pose.rUpperLegX + pose.rLowerLegX;
+            }
+        }
+
+        // Compose M = T(worldFoot) * Ry(partYaw) * T(px, py+extraY, pz+extraZ) * Rx(pitchX) * T(-px, -py, -pz)
+        float cy = (float) Math.cos(partYaw), sy = (float) Math.sin(partYaw);
+        float cp = (float) Math.cos(pitchX), sp = (float) Math.sin(pitchX);
+        float r00 = cy,  r01 = sy * sp, r02 = sy * cp;
+        float r10 = 0f,  r11 = cp,      r12 = -sp;
+        float r20 = -sy, r21 = cy * sp, r22 = cy * cp;
+        float tpx = px * cy + (pz + extraZ) * sy;
+        float tpy = py + extraY;
+        float tpz = -px * sy + (pz + extraZ) * cy;
+        float rpx = r00 * (-px) + r01 * (-py) + r02 * (-pz);
+        float rpy = r10 * (-px) + r11 * (-py) + r12 * (-pz);
+        float rpz = r20 * (-px) + r21 * (-py) + r22 * (-pz);
+
+        double wx = origin[0] + tpx + rpx;
+        double wy = origin[1] - scene.charHy + tpy + rpy;
+        double wz = origin[2] + tpz + rpz;
+        double[] c = { wx, wy, wz, r00, r01, r02, r10, r11, r12, r20, r21, r22 };
+        setModel(c, 1f, 1f, 1f);
     }
 
     private void drawLimbChain(double[] origin, float cy, float sy, float ox, float pivotY, float oz,
