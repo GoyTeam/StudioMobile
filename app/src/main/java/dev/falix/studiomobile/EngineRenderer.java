@@ -859,16 +859,16 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             ensureAvatarMeshUploaded();
             double[] p = scene.charPos;
             double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
-            float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
+            float cosYaw = (float) Math.cos(yaw), sinYaw = (float) Math.sin(yaw);
             if (avatarPosBuf != null && avatarVertCount > 0 && scene.use3dAvatar) {
-                double[] cc = {p[0], p[1] - scene.charHy, p[2], cy, 0, sy, 0, 1, 0, -sy, 0, cy};
+                double[] cc = {p[0], p[1] - scene.charHy, p[2], cosYaw, 0, sinYaw, 0, 1, 0, -sinYaw, 0, cosYaw};
                 setModel(cc, 1f, 1f, 1f);
                 Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
                 GLES20.glUniformMatrix4fv(shLightMvp, 1, false, mLightMvp, 0);
                 GLES20.glVertexAttribPointer(shPos, 3, GLES20.GL_FLOAT, false, 0, avatarPosBuf);
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, avatarVertCount);
             } else {
-                double[] cc = {p[0], p[1] - scene.charHy + 2.6, p[2], cy, 0, sy, 0, 1, 0, -sy, 0, cy};
+                double[] cc = {p[0], p[1] - scene.charHy + 2.6, p[2], cosYaw, 0, sinYaw, 0, 1, 0, -sinYaw, 0, cosYaw};
                 setModel(cc, 2.2f, 5.0f, 1.2f);
                 Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
                 GLES20.glUniformMatrix4fv(shLightMvp, 1, false, mLightMvp, 0);
