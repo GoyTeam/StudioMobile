@@ -1,6 +1,58 @@
 package dev.falix.studiomobile;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.io.*;
+import java.net.URL;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Fetches, caches, decodes, and evaluates official Roblox R6 & R15 KeyframeSequence animations
+ * directly from Roblox Asset Delivery using {@link PlaceDecoder}.
+ */
 final class RobloxAnimations {
+    interface LogCallback { void log(String level, String message); }
+
+    // Official Roblox default Animate script KeyframeSequence Asset IDs
+    static final long R15_IDLE = 507766388L;
+    static final long R15_WALK = 507777826L;
+    static final long R15_RUN  = 507767714L;
+    static final long R15_JUMP = 507765000L;
+    static final long R15_FALL = 507767968L;
+
+    static final long R6_IDLE  = 180435571L;
+    static final long R6_WALK  = 180426354L;
+    static final long R6_JUMP  = 125750702L;
+    static final long R6_FALL  = 180436148L;
+
+    static final class JointSample {
+        float rx, ry, rz;
+        float ty;
+    }
+
+    static final class Frame {
+        final float time;
+        final HashMap<String, JointSample> joints = new HashMap<>();
+        Frame(float time) { this.time = time; }
+    }
+
+    static final class Clip {
+        final String name;
+        final long assetId;
+        final float duration;
+        final boolean loop;
+        final ArrayList<Frame> frames;
+
+        Clip(String name, long assetId, float duration, boolean loop, ArrayList<Frame> frames) {
+            this.name = name;
+            this.assetId = assetId;
+            this.duration = Math.max(0.05f, duration);
+            this.loop = loop;
+            this.frames = frames;
+        }
+    }
+
     static final class Pose {
         float bobY;
         float torsoPitch, torsoYaw;
@@ -9,86 +61,327 @@ final class RobloxAnimations {
         float rUpperArmX, rUpperArmZ, rLowerArmX;
         float lUpperLegX, lLowerLegX;
         float rUpperLegX, rLowerLegX;
+        boolean fromRoblox;
+    }
+
+    private static final ConcurrentHashMap<String, Clip> CLIPS = new ConcurrentHashMap<>();
+    private static volatile boolean loadingStarted = false;
+    private static volatile int loadedCount = 0;
+
+    static int loadedClipCount() { return loadedCount; }
+
+    static void loadFromRobloxAsync(final File cacheDir, final String apiKey, final LogCallback log) {
+        if (loadingStarted && loadedCount >= 9) return;
+        loadingStarted = true;
+        Thread t = new Thread(() -> {
+            File dir = new File(cacheDir, "rbx_anims");
+            if (!dir.exists()) dir.mkdirs();
+            Object[][] specs = {
+                {"r15_idle", R15_IDLE, true},
+                {"r15_walk", R15_WALK, true},
+                {"r15_run",  R15_RUN,  true},
+                {"r15_jump", R15_JUMP, false},
+                {"r15_fall", R15_FALL, true},
+                {"r6_idle",  R6_IDLE,  true},
+                {"r6_walk",  R6_WALK,  true},
+                {"r6_jump",  R6_JUMP,  false},
+                {"r6_fall",  R6_FALL,  true}
+            };
+            int ok = 0;
+            String lastErr = null;
+            for (Object[] spec : specs) {
+                String key = (String) spec[0];
+                long id = (Long) spec[1];
+                boolean loop = (Boolean) spec[2];
+                if (CLIPS.containsKey(key)) { ok++; continue; }
+                try {
+                    File cached = new File(dir, id + ".rbxm");
+                    if (!cached.exists() || cached.length() < 32) {
+                        downloadAsset(id, apiKey, cached);
+                    }
+                    if (cached.exists() && cached.length() >= 32) {
+                        Clip clip = decodeClip(key, id, loop, cached);
+                        if (clip != null && !clip.frames.isEmpty()) {
+                            CLIPS.put(key, clip);
+                            ok++;
+                        } else {
+                            cached.delete();
+                        }
+                    }
+                } catch (Throwable e) {
+                    lastErr = e.getClass().getSimpleName() + ": " + e.getMessage();
+                }
+            }
+            loadedCount = ok;
+            if (log != null) {
+                if (ok > 0) {
+                    log.log("info", "Loaded " + ok + "/9 official Roblox KeyframeSequence animations (R6 & R15).");
+                } else {
+                    log.log("warn", "Could not download Roblox KeyframeSequence animations" + (lastErr != null ? " (" + lastErr + ")" : "") + ".");
+                }
+            }
+        }, "RobloxAnimLoader");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    static void forceReloadAsync(File cacheDir, String apiKey, LogCallback log) {
+        CLIPS.clear();
+        loadedCount = 0;
+        loadingStarted = false;
+        loadFromRobloxAsync(cacheDir, apiKey, log);
+    }
+
+    private static void downloadAsset(long assetId, String apiKey, File target) throws Exception {
+        // 1. Try Open Cloud Asset Delivery when API key is available
+        if (apiKey != null && !apiKey.isEmpty()) {
+            try {
+                String url = "https://apis.roblox.com/asset-delivery-api/v1/assetId/" + assetId;
+                okhttp3.Request req = new okhttp3.Request.Builder()
+                        .url(url)
+                        .header("x-api-key", apiKey)
+                        .header("Accept", "application/json, application/octet-stream")
+                        .header("User-Agent", "Roblox/WinInet")
+                        .get().build();
+                try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
+                    if (res.isSuccessful() && res.body() != null) {
+                        String ct = res.header("Content-Type", "");
+                        byte[] bytes = readLimited(res.body().byteStream(), 8 * 1024 * 1024);
+                        if (ct != null && ct.toLowerCase(Locale.US).contains("json")) {
+                            JSONObject o = new JSONObject(new String(bytes, "UTF-8"));
+                            String loc = o.optString("location", "");
+                            if (loc.isEmpty()) {
+                                JSONArray locs = o.optJSONArray("locations");
+                                if (locs != null && locs.length() > 0) loc = locs.getJSONObject(0).optString("location", "");
+                            }
+                            if (!loc.isEmpty() && downloadUrlToFile(loc, target)) return;
+                        } else if (bytes.length >= 32) {
+                            writeBytes(target, bytes);
+                            return;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }
+        // 2. Fallback to public Roblox asset delivery endpoint
+        downloadUrlToFile("https://assetdelivery.roblox.com/v1/asset/?id=" + assetId, target);
+    }
+
+    private static boolean downloadUrlToFile(String location, File target) {
+        try {
+            String cur = location;
+            for (int r = 0; r < 6; r++) {
+                URL u = new URL(cur);
+                if (!RobloxApi.imageHost(u)) return false;
+                okhttp3.Request req = new okhttp3.Request.Builder()
+                        .url(cur)
+                        .header("User-Agent", "Roblox/WinInet")
+                        .get().build();
+                try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
+                    if (res.code() >= 300 && res.code() < 400) {
+                        String next = res.header("Location");
+                        if (next == null) return false;
+                        cur = new URL(u, next).toString();
+                        continue;
+                    }
+                    if (!res.isSuccessful() || res.body() == null) return false;
+                    byte[] bytes = readLimited(res.body().byteStream(), 8 * 1024 * 1024);
+                    if (bytes.length < 32) return false;
+                    writeBytes(target, bytes);
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) { }
+        return false;
+    }
+
+    private static byte[] readLimited(InputStream in, int maxBytes) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[16384];
+        int n, total = 0;
+        while ((n = in.read(buf)) != -1) {
+            total += n;
+            if (total > maxBytes) throw new IOException("Animation asset too large");
+            out.write(buf, 0, n);
+        }
+        return out.toByteArray();
+    }
+
+    private static void writeBytes(File f, byte[] data) throws IOException {
+        File tmp = new File(f.getParentFile(), f.getName() + ".tmp");
+        try (FileOutputStream fos = new FileOutputStream(tmp)) {
+            fos.write(data);
+        }
+        if (f.exists()) f.delete();
+        tmp.renameTo(f);
+    }
+
+    private static Clip decodeClip(String name, long assetId, boolean loop, File file) throws Exception {
+        PlaceDecoder.Result decoded = PlaceDecoder.decode(file);
+        if (decoded == null || decoded.root == null) return null;
+        Instance seq = findFirstByClass(decoded.root, "KeyframeSequence");
+        if (seq == null) seq = decoded.root;
+        ArrayList<Frame> frames = new ArrayList<>();
+        float maxTime = 0f;
+        for (Instance child : seq.children) {
+            if (!"Keyframe".equals(child.className)) continue;
+            float time = (float) child.getNumber("Time", 0.0);
+            if (time > maxTime) maxTime = time;
+            Frame frame = new Frame(time);
+            collectPoses(child, frame.joints);
+            if (!frame.joints.isEmpty()) frames.add(frame);
+        }
+        if (frames.isEmpty()) return null;
+        Collections.sort(frames, (a, b) -> Float.compare(a.time, b.time));
+        if (maxTime < 0.05f) maxTime = 1.0f;
+        return new Clip(name, assetId, maxTime, loop, frames);
+    }
+
+    private static Instance findFirstByClass(Instance root, String cls) {
+        if (cls.equals(root.className)) return root;
+        for (Instance c : root.children) {
+            Instance hit = findFirstByClass(c, cls);
+            if (hit != null) return hit;
+        }
+        return null;
+    }
+
+    private static void collectPoses(Instance node, HashMap<String, JointSample> out) {
+        if ("Pose".equals(node.className) && node.name != null && !node.name.isEmpty()) {
+            double[] cf = node.cframe();
+            if (cf != null && cf.length >= 12) {
+                JointSample js = new JointSample();
+                js.ty = (float) cf[1];
+                // Extract Euler XYZ angles from Roblox 3x3 rotation matrix (row-major R00..R22)
+                double r00 = cf[3], r01 = cf[4], r02 = cf[5];
+                double r10 = cf[6], r11 = cf[7], r12 = cf[8];
+                double r20 = cf[9], r21 = cf[10], r22 = cf[11];
+                double sy = Math.max(-1.0, Math.min(1.0, r02));
+                js.ry = (float) Math.asin(sy);
+                if (Math.abs(sy) < 0.9999) {
+                    js.rx = (float) Math.atan2(-r12, r22);
+                    js.rz = (float) Math.atan2(-r01, r00);
+                } else {
+                    js.rx = (float) Math.atan2(r21, r11);
+                    js.rz = 0f;
+                }
+                out.put(node.name, js);
+            }
+        }
+        for (Instance c : node.children) collectPoses(c, out);
     }
 
     static Pose evaluate(boolean isR15, boolean onGround, double speed, double walkSpeed,
-                         double walkPhase, double idleTime, double landTimer, double velY) {
+                         double animTime, double velY) {
         Pose p = new Pose();
-        float speedFrac = (float) Math.min(1.25, speed / Math.max(1.0, walkSpeed));
-        float moveBlend = Math.min(1.0f, speedFrac * 1.4f);
-
+        String clipKey;
         if (!onGround) {
-            if (isR15) {
-                boolean rising = velY > 2.0;
-                p.torsoPitch = rising ? -0.08f : 0.06f;
-                p.lUpperArmX = rising ? -2.35f : -2.65f;
-                p.rUpperArmX = rising ? -2.35f : -2.65f;
-                p.lUpperArmZ = -0.28f;
-                p.rUpperArmZ = 0.28f;
-                p.lLowerArmX = -0.45f;
-                p.rLowerArmX = -0.45f;
-                p.lUpperLegX = rising ? -0.45f : -0.25f;
-                p.lLowerLegX = rising ? 0.78f : 0.48f;
-                p.rUpperLegX = rising ? 0.22f : 0.12f;
-                p.rLowerLegX = rising ? 0.42f : 0.30f;
-            } else {
-                // Classic Roblox R6 Jump / Fall: iconic arms straight up overhead
-                p.lUpperArmX = velY > 0 ? -3.05f : -2.75f;
-                p.rUpperArmX = velY > 0 ? -3.05f : -2.75f;
-                p.lUpperLegX = 0.16f;
-                p.rUpperLegX = -0.16f;
+            clipKey = (isR15 ? "r15_" : "r6_") + (velY > 1.5 ? "jump" : "fall");
+        } else if (speed < 0.35) {
+            clipKey = isR15 ? "r15_idle" : "r6_idle";
+        } else if (isR15 && speed > walkSpeed * 0.65) {
+            clipKey = "r15_run";
+        } else {
+            clipKey = isR15 ? "r15_walk" : "r6_walk";
+        }
+
+        Clip clip = CLIPS.get(clipKey);
+        if (clip == null && "r15_run".equals(clipKey)) clip = CLIPS.get("r15_walk");
+        if (clip == null || clip.frames.isEmpty()) {
+            // Neutral Roblox bind pose while official KeyframeSequence clips are downloading
+            return p;
+        }
+        p.fromRoblox = true;
+
+        float rate = 1.0f;
+        if (onGround && speed >= 0.35) {
+            rate = (float) Math.max(0.55, Math.min(1.85, speed / Math.max(1.0, walkSpeed)));
+        }
+        float t = (float) (animTime * rate);
+        if (clip.loop) {
+            t = t % clip.duration;
+            if (t < 0) t += clip.duration;
+        } else {
+            t = Math.max(0f, Math.min(clip.duration, t));
+        }
+
+        Frame a = clip.frames.get(0);
+        Frame b = clip.frames.get(clip.frames.size() - 1);
+        for (int i = 0; i < clip.frames.size() - 1; i++) {
+            Frame f0 = clip.frames.get(i);
+            Frame f1 = clip.frames.get(i + 1);
+            if (t >= f0.time && t <= f1.time) {
+                a = f0;
+                b = f1;
+                break;
             }
-            return p;
         }
+        float span = Math.max(0.0001f, b.time - a.time);
+        float alpha = Math.max(0f, Math.min(1f, (t - a.time) / span));
+        // Smoothstep interpolation matching Roblox Enum.PoseEasingStyle.Cubic/Linear blend
+        float s = alpha * alpha * (3f - 2f * alpha);
 
-        // Idle keyframe loop (Roblox default Animate idle + occasional head look-around)
-        float idleBreath = (float) Math.sin(idleTime * 2.1);
-        float lookCycle = (float) (idleTime % 7.5);
-        float idleHeadYaw = 0f;
-        if (lookCycle > 4.5f && lookCycle < 6.5f) {
-            idleHeadYaw = (float) Math.sin((lookCycle - 4.5f) * Math.PI * 0.5) * 0.32f;
+        if (isR15) {
+            JointSample lt = sample(a, b, "LowerTorso", s);
+            JointSample ut = sample(a, b, "UpperTorso", s);
+            JointSample hd = sample(a, b, "Head", s);
+            JointSample lua = sample(a, b, "LeftUpperArm", s);
+            JointSample lla = sample(a, b, "LeftLowerArm", s);
+            JointSample rua = sample(a, b, "RightUpperArm", s);
+            JointSample rla = sample(a, b, "RightLowerArm", s);
+            JointSample lul = sample(a, b, "LeftUpperLeg", s);
+            JointSample lll = sample(a, b, "LeftLowerLeg", s);
+            JointSample rul = sample(a, b, "RightUpperLeg", s);
+            JointSample rll = sample(a, b, "RightLowerLeg", s);
+
+            p.bobY = lt.ty;
+            p.torsoPitch = lt.rx + ut.rx;
+            p.torsoYaw = lt.ry + ut.ry;
+            p.headYaw = hd.ry;
+            p.headPitch = hd.rx;
+            p.lUpperArmX = lua.rx;
+            p.lUpperArmZ = lua.rz;
+            p.lLowerArmX = lla.rx;
+            p.rUpperArmX = rua.rx;
+            p.rUpperArmZ = rua.rz;
+            p.rLowerArmX = rla.rx;
+            p.lUpperLegX = lul.rx;
+            p.lLowerLegX = lll.rx;
+            p.rUpperLegX = rul.rx;
+            p.rLowerLegX = rll.rx;
+        } else {
+            JointSample tr = sample(a, b, "Torso", s);
+            JointSample hd = sample(a, b, "Head", s);
+            JointSample la = sample(a, b, "Left Arm", s);
+            JointSample ra = sample(a, b, "Right Arm", s);
+            JointSample ll = sample(a, b, "Left Leg", s);
+            JointSample rl = sample(a, b, "Right Leg", s);
+
+            p.bobY = tr.ty;
+            p.torsoPitch = tr.rx;
+            p.torsoYaw = tr.ry;
+            p.headYaw = hd.ry;
+            p.headPitch = hd.rx;
+            // R6 Motor6D shoulder/hip joints rotate around local Z/X in Roblox's KeyframeSequence
+            p.lUpperArmX = Math.abs(la.rx) > Math.abs(la.rz) ? la.rx : -la.rz;
+            p.rUpperArmX = Math.abs(ra.rx) > Math.abs(ra.rz) ? ra.rx : ra.rz;
+            p.lUpperLegX = Math.abs(ll.rx) > Math.abs(ll.rz) ? ll.rx : -ll.rz;
+            p.rUpperLegX = Math.abs(rl.rx) > Math.abs(rl.rz) ? rl.rx : rl.rz;
         }
-
-        float landSquash = landTimer > 0 ? (float) Math.sin(landTimer * Math.PI / 0.18) * 0.22f : 0f;
-
-        if (!isR15) {
-            // Official Roblox R6 Walk / Run / Idle cycle
-            float swing = (float) Math.sin(walkPhase) * 0.92f * Math.min(1.0f, speedFrac);
-            float idleArm = idleBreath * 0.07f * (1f - moveBlend);
-            p.bobY = Math.abs((float) Math.sin(walkPhase)) * 0.10f * moveBlend - landSquash * 0.6f;
-            p.headYaw = idleHeadYaw * (1f - moveBlend);
-            p.lUpperArmX = -swing + idleArm;
-            p.rUpperArmX = swing - idleArm;
-            p.lUpperLegX = swing;
-            p.rUpperLegX = -swing;
-            return p;
-        }
-
-        // Official Roblox R15 Walk / Run / Idle keyframe synthesis
-        float runBlend = Math.max(0f, Math.min(1f, (speedFrac - 0.55f) / 0.45f));
-        float phase = (float) walkPhase;
-        float s = (float) Math.sin(phase);
-        float c = (float) Math.cos(phase);
-
-        float ampLeg = (0.58f + 0.32f * runBlend) * moveBlend;
-        float ampArm = (0.52f + 0.38f * runBlend) * moveBlend;
-
-        p.bobY = (Math.abs(s) * (0.12f + 0.08f * runBlend) * moveBlend) + idleBreath * 0.025f * (1f - moveBlend) - landSquash;
-        p.torsoPitch = (0.06f + 0.14f * runBlend) * moveBlend;
-        p.torsoYaw = s * (0.10f + 0.06f * runBlend) * moveBlend;
-        p.headYaw = idleHeadYaw * (1f - moveBlend) - p.torsoYaw * 0.5f;
-
-        p.lUpperArmX = -s * ampArm + idleBreath * 0.04f * (1f - moveBlend);
-        p.rUpperArmX = s * ampArm - idleBreath * 0.04f * (1f - moveBlend);
-        p.lLowerArmX = -(0.14f + Math.max(0f, -p.lUpperArmX) * (0.55f + 0.45f * runBlend) + 0.25f * runBlend * moveBlend);
-        p.rLowerArmX = -(0.14f + Math.max(0f, -p.rUpperArmX) * (0.55f + 0.45f * runBlend) + 0.25f * runBlend * moveBlend);
-
-        p.lUpperLegX = s * ampLeg;
-        p.rUpperLegX = -s * ampLeg;
-        float kneeL = Math.max(0f, -c) * (0.55f + 0.45f * runBlend) * moveBlend + landSquash * 1.4f;
-        float kneeR = Math.max(0f, c) * (0.55f + 0.45f * runBlend) * moveBlend + landSquash * 1.4f;
-        p.lLowerLegX = kneeL;
-        p.rLowerLegX = kneeR;
         return p;
+    }
+
+    private static JointSample sample(Frame a, Frame b, String name, float t) {
+        JointSample ja = a.joints.get(name);
+        JointSample jb = b.joints.get(name);
+        JointSample out = new JointSample();
+        if (ja == null && jb == null) return out;
+        if (ja == null) return jb;
+        if (jb == null) return ja;
+        out.rx = ja.rx + (jb.rx - ja.rx) * t;
+        out.ry = ja.ry + (jb.ry - ja.ry) * t;
+        out.rz = ja.rz + (jb.rz - ja.rz) * t;
+        out.ty = ja.ty + (jb.ty - ja.ty) * t;
+        return out;
     }
 }

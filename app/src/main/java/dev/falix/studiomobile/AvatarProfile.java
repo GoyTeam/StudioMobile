@@ -57,7 +57,7 @@ final class AvatarProfile {
         return sb.toString();
     }
 
-    static AvatarProfile fetchForUser(RobloxApi api, long userId, String username) {
+    static AvatarProfile fetchForUser(RobloxApi api, String apiKey, long userId, String username) {
         AvatarProfile p = new AvatarProfile();
         p.userId = userId;
         if (username != null && !username.isEmpty()) p.username = username;
@@ -182,7 +182,7 @@ final class AvatarProfile {
             if (p.legBitmap == null) p.legBitmap = solidSwatch(p.effectiveLeftLegColor());
 
             StringBuilder diag = new StringBuilder();
-            p.mesh3d = AvatarMesh.fetch(api, userId, diag);
+            p.mesh3d = AvatarMesh.fetch(api, apiKey, userId, diag);
             p.statusNote = diag.length() > 0 ? diag.toString() : "ok";
             p.loadedFromRoblox = true;
             p.textureVersion++;

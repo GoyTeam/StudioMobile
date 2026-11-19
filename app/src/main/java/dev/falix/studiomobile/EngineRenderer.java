@@ -99,25 +99,24 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec2 planar = abs(n.y) >= abs(n.x) && abs(n.y) >= abs(n.z) ? vWorld.xz : (abs(n.x) >= abs(n.z) ? vWorld.zy : vWorld.xy);\n" +
             "  const float EDGE = 0.0039;\n" +
             "  vec2 cell = spawnFace ? faceUv : fract(planar * tile.z);\n" +
-            "  vec2 atlasUv = tile.xy * uAtlasStep + (cell * (1.0 - 2.0 * EDGE) + EDGE) * uAtlasStep;\n" +
+            "  vec2 atlasUv = tile.xy + (cell * (1.0 - 2.0 * EDGE) + EDGE) * uAtlasStep;\n" +
             "  vec3 base = uColor;\n" +
             "  if (uIsBaseplate > 0.5 && n.y > 0.5) {\n" +
             "    float camD = length(uEye - vWorld);\n" +
-            "    float fade1 = 1.0 - smoothstep(16.0, 82.0, camD);\n" +
-            "    float fade4 = 1.0 - smoothstep(70.0, 320.0, camD);\n" +
+            "    float fade1 = 1.0 - smoothstep(18.0, 88.0, camD);\n" +
+            "    float fade4 = 1.0 - smoothstep(55.0, 260.0, camD);\n" +
             "    vec2 c4 = floor(vWorld.xz * 0.25);\n" +
             "    float chk4 = mod(c4.x + c4.y, 2.0);\n" +
-            "    vec2 c1 = floor(vWorld.xz);\n" +
-            "    float chk1 = mod(c1.x + c1.y, 2.0);\n" +
             "    vec2 g1 = abs(fract(vWorld.xz) - 0.5);\n" +
-            "    float line1 = smoothstep(0.472, 0.496, max(g1.x, g1.y));\n" +
+            "    float line1 = smoothstep(0.455, 0.495, max(g1.x, g1.y));\n" +
+            "    float studPad = 1.0 - smoothstep(0.36, 0.46, max(g1.x, g1.y));\n" +
             "    vec2 g4 = abs(fract(vWorld.xz * 0.25) - 0.5);\n" +
-            "    float line4 = smoothstep(0.484, 0.497, max(g4.x, g4.y));\n" +
-            "    vec3 darkTile = vec3(0.30, 0.35, 0.43);\n" +
-            "    vec3 lightTile = vec3(0.39, 0.44, 0.53);\n" +
+            "    float line4 = smoothstep(0.480, 0.497, max(g4.x, g4.y));\n" +
+            "    vec3 darkTile = vec3(0.240, 0.270, 0.320);\n" +
+            "    vec3 lightTile = vec3(0.278, 0.310, 0.364);\n" +
             "    vec3 tileCol = mix(darkTile, lightTile, mix(0.5, chk4, fade4));\n" +
-            "    tileCol *= (1.0 + (chk1 - 0.5) * 0.032 * fade1);\n" +
-            "    base = tileCol * (1.0 - line1 * 0.042 * fade1 - line4 * 0.13 * fade4);\n" +
+            "    tileCol *= (1.0 + studPad * 0.022 * fade1);\n" +
+            "    base = tileCol * (1.0 - line1 * 0.085 * fade1 - line4 * 0.145 * fade4);\n" +
             "  } else if (tile.w > 0.5) {\n" +
             "    base *= texture2D(uAtlas, atlasUv).rgb;\n" +
             "  }\n" +
@@ -158,8 +157,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);\n" +
             "  float viewDist = length(uEye - vWorld);\n" +
             "  float fog = uFogEnabled * clamp((viewDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.001), 0.0, 1.0);\n" +
-            "  float atmoHorizon = smoothstep(95.0, 420.0, viewDist) * 0.78;\n" +
-            "  vec3 finalCol = mix(col, mix(uFogColor, vec3(0.62, 0.71, 0.82), 0.65), max(fog, atmoHorizon));\n" +
+            "  float atmoHorizon = smoothstep(55.0, 260.0, viewDist) * 0.88;\n" +
+            "  vec3 finalCol = mix(col, mix(uFogColor, vec3(0.56, 0.63, 0.72), 0.72), max(fog, atmoHorizon));\n" +
             "  gl_FragColor = vec4(finalCol, uAlpha);\n" +
             "}";
 
@@ -1394,7 +1393,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float hds = av.isR15 ? av.headScale : 1.0f;
         RobloxAnimations.Pose pose = RobloxAnimations.evaluate(
                 av.isR15, scene.onGround, scene.charSpeed, scene.walkSpeed,
-                scene.charWalkPhase, scene.idleTime, scene.landTimer, scene.charVel[1]);
+                scene.idleTime, scene.charVel[1]);
         float bob = pose.bobY;
 
         double headYaw = yaw + pose.headYaw;

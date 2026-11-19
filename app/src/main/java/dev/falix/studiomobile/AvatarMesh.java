@@ -41,13 +41,14 @@ final class AvatarMesh {
         return "https://t" + (i & 7) + ".rbxcdn.com/" + hash;
     }
 
-    static AvatarMesh fetch(RobloxApi api, long userId, StringBuilder diag) {
+    static AvatarMesh fetch(RobloxApi api, String apiKey, long userId, StringBuilder diag) {
         if (api == null || userId <= 0) return null;
         try {
             String manifestUrl = null;
             String lastState = "none";
             for (int attempt = 0; attempt < 5; attempt++) {
-                JSONObject resp = api.json("https://thumbnails.roblox.com/v1/users/avatar-3d?userId=" + userId, null, null);
+                JSONObject resp = fetch3dThumbnailJson(api, apiKey, userId);
+                if (resp == null) break;
                 lastState = resp.optString("state", "");
                 String url = resp.optString("imageUrl", "");
                 if ("Completed".equalsIgnoreCase(lastState) && !url.isEmpty()) {
@@ -103,9 +104,41 @@ final class AvatarMesh {
 
             return parseObj(api, objText, mtlTexHashes, texCache, defaultTex);
         } catch (Throwable err) {
-            if (diag != null) diag.append("3D err: ").append(err.getClass().getSimpleName()).append(": ").append(err.getMessage());
+            if (diag != null) {
+                String msg = err.getMessage() == null ? "" : err.getMessage();
+                if (msg.contains("403") || msg.contains("401")) {
+                    diag.append("3D needs 'thumbnails:read' on API key");
+                } else {
+                    diag.append("3D err: ").append(err.getClass().getSimpleName());
+                }
+            }
             return null;
         }
+    }
+
+    private static JSONObject fetch3dThumbnailJson(RobloxApi api, String apiKey, long userId) throws Exception {
+        // Since March 2026 Roblox requires an Open Cloud API key (thumbnails:read) for avatar-3d
+        if (apiKey != null && !apiKey.isEmpty()) {
+            try {
+                return api.json("https://apis.roblox.com/thumbnails/v1/users/avatar-3d?userId=" + userId, apiKey, null);
+            } catch (Throwable ignored) { }
+            // Fallback: send x-api-key directly to thumbnails.roblox.com
+            okhttp3.Request req = new okhttp3.Request.Builder()
+                    .url("https://thumbnails.roblox.com/v1/users/avatar-3d?userId=" + userId)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "Mozilla/5.0")
+                    .header("x-api-key", apiKey)
+                    .get().build();
+            try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
+                if (res.isSuccessful() && res.body() != null) {
+                    return new JSONObject(res.body().string());
+                }
+                if (res.code() == 401 || res.code() == 403) {
+                    throw new RobloxApi.ApiException(res.code(), "HTTP " + res.code());
+                }
+            }
+        }
+        return api.json("https://thumbnails.roblox.com/v1/users/avatar-3d?userId=" + userId, null, null);
     }
 
     private static void parseMtl(String mtlText, HashMap<String, String> out) {

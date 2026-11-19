@@ -37,6 +37,12 @@ public final class EngineActivity extends Activity {
     private boolean narrowScreen;
     private int explorerWidth, propertiesWidth;
     private TextView title, subtitle, playLabel, explorerCount, flySpeedPill, camModePill, healthLabel, rigPill;
+    private View loadingOverlay, bottomCmdBar, docTabStrip;
+    private TextView loadingStatus, docTabTitle;
+    private ViewCubeView viewCube;
+    private LinearLayout ribbonTabsBar;
+    private String activeRibbonTab = "HOME";
+    private int viewCubePreset = 0;
     private EditText explorerSearch, commandInput;
     private FrameLayout viewportLayer;
     private TextView rendererError;
@@ -202,15 +208,27 @@ public final class EngineActivity extends Activity {
 
     private void applyPalette() {
         m3 = MaterialYou.resolve(this, dark);
-        PANEL = m3.surfaceLow;
-        PANEL2 = m3.surfaceContainer;
-        TEXT = m3.onSurface;
-        MUTED = m3.onSurfaceVariant;
-        BORDER = m3.outlineVariant;
-        ACCENT = m3.primary;
-        ON_ACCENT = m3.onPrimary;
-        SOFT = m3.secondaryContainer;
-        CANVAS = m3.surface;
+        if (dark) {
+            PANEL = 0xFF2E2E2E;
+            PANEL2 = 0xFF252525;
+            CANVAS = 0xFF1F1F1F;
+            TEXT = 0xFFE8E8E8;
+            MUTED = 0xFF9E9E9E;
+            BORDER = 0xFF3F3F3F;
+            ACCENT = 0xFF00A2FF;
+            ON_ACCENT = 0xFFFFFFFF;
+            SOFT = 0xFF383838;
+        } else {
+            PANEL = m3.surfaceLow;
+            PANEL2 = m3.surfaceContainer;
+            TEXT = m3.onSurface;
+            MUTED = m3.onSurfaceVariant;
+            BORDER = m3.outlineVariant;
+            ACCENT = 0xFF00A2FF;
+            ON_ACCENT = 0xFFFFFFFF;
+            SOFT = m3.secondaryContainer;
+            CANVAS = m3.surface;
+        }
     }
 
     // ------------------------------------------------------------------ layout
@@ -228,9 +246,12 @@ public final class EngineActivity extends Activity {
         scene.setOutputListener(() -> runOnUiThread(this::rebuildOutput));
         scene.setUiRefreshListener(() -> runOnUiThread(() -> { if (scene.playing) rebuildPlayGui(); }));
 
+        FrameLayout outer = new FrameLayout(this);
         LinearLayout root = col();
         root.setBackgroundColor(PANEL);
-        root.addView(buildTopBar(), lp(-1, dp(46)));
+        root.addView(buildTopBar(), lp(-1, dp(38)));
+        root.addView(line(), lp(-1, dp(1)));
+        root.addView(buildDocTabStrip(), lp(-1, dp(26)));
         root.addView(line(), lp(-1, dp(1)));
 
         explorerPanel = buildExplorer();
@@ -301,7 +322,139 @@ public final class EngineActivity extends Activity {
             body.addView(propertiesSeparator, lp(dp(1), -1));
             body.addView(propertiesPanel, lp(propertiesWidth, -1));
         }
-        return root;
+        bottomCmdBar = buildBottomCommandBar();
+        root.addView(line(), lp(-1, dp(1)));
+        root.addView(bottomCmdBar, lp(-1, dp(26)));
+        outer.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        loadingOverlay = buildLoadingOverlay();
+        outer.addView(loadingOverlay, new FrameLayout.LayoutParams(-1, -1));
+        return outer;
+    }
+
+    private View buildDocTabStrip() {
+        LinearLayout bar = row();
+        bar.setBackgroundColor(PANEL2);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(6), 0, dp(6), 0);
+        LinearLayout tab = row();
+        tab.setGravity(Gravity.CENTER_VERTICAL);
+        tab.setBackgroundColor(PANEL);
+        tab.setPadding(dp(10), 0, dp(10), 0);
+        View dot = new View(this);
+        dot.setBackground(shape(ACCENT, 3));
+        tab.addView(dot, lp(dp(6), dp(6)));
+        docTabTitle = text(placeName, 10.5f, true, TEXT);
+        docTabTitle.setSingleLine(true);
+        docTabTitle.setEllipsize(TextUtils.TruncateAt.END);
+        tab.addView(docTabTitle, margin(dp(6), 0, -2, -2));
+        bar.addView(tab, lp(-2, dp(24)));
+        bar.addView(new View(this), lp(0, 1, 1));
+        String[] rTabs = {"HOME", "MODEL", "AVATAR", "TEST", "VIEW", "PLUGINS"};
+        ribbonTabsBar = row();
+        ribbonTabsBar.setGravity(Gravity.CENTER_VERTICAL);
+        for (String rt : rTabs) {
+            TextView tv = text(rt, 9.5f, true, rt.equals(activeRibbonTab) ? ACCENT : MUTED);
+            tv.setPadding(dp(7), dp(3), dp(7), dp(3));
+            tv.setOnClickListener(v -> selectRibbonTab(rt));
+            ribbonTabsBar.addView(tv);
+        }
+        HorizontalScrollView rScroll = new HorizontalScrollView(this);
+        rScroll.setHorizontalScrollBarEnabled(false);
+        rScroll.addView(ribbonTabsBar);
+        bar.addView(rScroll, lp(-2, dp(24)));
+        docTabStrip = bar;
+        return bar;
+    }
+
+    private void selectRibbonTab(String tab) {
+        activeRibbonTab = tab;
+        if (ribbonTabsBar != null) {
+            for (int i = 0; i < ribbonTabsBar.getChildCount(); i++) {
+                View c = ribbonTabsBar.getChildAt(i);
+                if (c instanceof TextView) {
+                    TextView tv = (TextView) c;
+                    boolean on = tab.equals(tv.getText().toString());
+                    tv.setTextColor(on ? ACCENT : MUTED);
+                    tv.setBackground(on ? shape(SOFT, 4) : null);
+                }
+            }
+        }
+        if ("VIEW".equals(tab)) {
+            togglePanel(explorerPanel, explorerSeparator);
+        } else if ("TEST".equals(tab)) {
+            if (!scene.playing) startPlay();
+        } else if ("AVATAR".equals(tab)) {
+            if (scene.avatar == null) scene.avatar = AvatarProfile.defaultAvatar();
+            scene.avatar.isR15 = !scene.avatar.isR15;
+            scene.use3dAvatar = false;
+            if (rigPill != null) rigPill.setText(scene.avatar.isR15 ? "R15" : "R6");
+            Toast.makeText(this, "Switched avatar rig to " + (scene.avatar.isR15 ? "R15" : "R6"), Toast.LENGTH_SHORT).show();
+        } else if ("PLUGINS".equals(tab)) {
+            togglePanel(toolboxPanel, null);
+        }
+    }
+
+    private View buildBottomCommandBar() {
+        LinearLayout bar = row();
+        bar.setBackgroundColor(PANEL2);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(10), 0, dp(10), 0);
+        TextView prompt = text("Run a command", 10.5f, false, MUTED);
+        bar.addView(prompt, lp(0, -2, 1));
+        TextView hint = text("Output & Luau", 9.5f, true, ACCENT);
+        bar.addView(hint);
+        bar.setOnClickListener(v -> togglePanel(outputPanel, null));
+        return bar;
+    }
+
+    private View buildLoadingOverlay() {
+        FrameLayout bg = new FrameLayout(this);
+        bg.setBackgroundColor(0xFF1E1E1E);
+        bg.setClickable(true);
+        bg.setFocusable(true);
+        LinearLayout box = col();
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+        box.setPadding(dp(28), dp(24), dp(28), dp(24));
+
+        // Roblox Studio tilted square emblem
+        FrameLayout badge = new FrameLayout(this);
+        GradientDrawable gd = new GradientDrawable();
+        gd.setColor(0xFF252525);
+        gd.setStroke(dp(3), 0xFF00A2FF);
+        gd.setCornerRadius(dp(6));
+        badge.setBackground(gd);
+        badge.setRotation(16f);
+        View innerHole = new View(this);
+        innerHole.setBackgroundColor(0xFF00A2FF);
+        badge.addView(innerHole, new FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER));
+        box.addView(badge, lp(dp(50), dp(50)));
+
+        TextView heading = text(placeName, 17, true, 0xFFF2F2F2);
+        heading.setPadding(0, dp(16), 0, dp(2));
+        box.addView(heading);
+
+        TextView sub = text("Roblox Studio Mobile", 11.5f, false, 0xFF9E9E9E);
+        sub.setPadding(0, 0, 0, dp(16));
+        box.addView(sub);
+
+        ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        pb.setIndeterminate(true);
+        pb.getIndeterminateDrawable().setColorFilter(0xFF00A2FF, android.graphics.PorterDuff.Mode.SRC_IN);
+        box.addView(pb, lp(dp(220), dp(6)));
+
+        loadingStatus = text("Opening place…", 11, false, 0xFFB8C0CC);
+        loadingStatus.setPadding(0, dp(10), 0, 0);
+        box.addView(loadingStatus);
+
+        bg.addView(box, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+        return bg;
+    }
+
+    private void hideLoadingOverlay() {
+        if (loadingOverlay == null || loadingOverlay.getVisibility() != View.VISIBLE) return;
+        loadingOverlay.animate().alpha(0f).setDuration(240).withEndAction(() -> {
+            if (loadingOverlay != null) loadingOverlay.setVisibility(View.GONE);
+        }).start();
     }
 
     private void togglePanel(View panel, View separator) {
@@ -344,7 +497,7 @@ public final class EngineActivity extends Activity {
         playButtonContainer = row();
         playButtonContainer.setGravity(Gravity.CENTER_VERTICAL);
         playButtonContainer.setPadding(dp(10), 0, dp(12), 0);
-        playButtonContainer.setBackground(shape(0xff1e8e5a, 20));
+        playButtonContainer.setBackground(shape(0xff00a2ff, 6));
         playLabel = text("Play", 11.5f, true, 0xffffffff);
         playIconView = new StudioIcon(this, "play", 0xffffffff);
         playButtonContainer.addView(playIconView, lp(dp(14), dp(14)));
@@ -408,7 +561,7 @@ public final class EngineActivity extends Activity {
         viewport = new EngineView(this, scene);
         viewport.setListener(new EngineView.Listener() {
             public void onPick(Instance hit) { scene.selection = hit; if (hit != null) { scene.focus(hit); expanded.add(hit); for (Instance p = hit.parent; p != null; p = p.parent) expanded.add(p); } refresh(); }
-            public void onCameraMoved() { }
+            public void onCameraMoved() { if (viewCube != null) viewCube.post(() -> viewCube.setAngles(scene.camYaw, scene.camPitch)); }
             public void onRendererError(String message) { rendererFailed(message); }
         });
         viewportLayer.addView(viewport, new FrameLayout.LayoutParams(-1, -1));
@@ -458,8 +611,22 @@ public final class EngineActivity extends Activity {
         rendererError.setBackground(shape(0xcc7a2118, 8));
         rendererError.setPadding(dp(10), dp(8), dp(10), dp(8));
         rendererError.setVisibility(View.GONE);
+        viewCube = new ViewCubeView(this);
+        viewCube.setAngles(scene.camYaw, scene.camPitch);
+        viewCube.setOnClickListener(v -> {
+            viewCubePreset = (viewCubePreset + 1) % 4;
+            if (viewCubePreset == 0) { scene.camYaw = 0.62; scene.camPitch = 0.42; }
+            else if (viewCubePreset == 1) { scene.camYaw = 0.0; scene.camPitch = 0.15; }
+            else if (viewCubePreset == 2) { scene.camYaw = Math.PI * 0.5; scene.camPitch = 0.15; }
+            else { scene.camYaw = 0.0; scene.camPitch = 1.35; }
+            viewCube.setAngles(scene.camYaw, scene.camPitch);
+        });
+        FrameLayout.LayoutParams cubeLp = new FrameLayout.LayoutParams(dp(64), dp(64), Gravity.TOP | Gravity.RIGHT);
+        cubeLp.setMargins(0, dp(6), dp(8), 0);
+        viewportLayer.addView(viewCube, cubeLp);
+
         FrameLayout.LayoutParams errorParams = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
-        errorParams.setMargins(0, dp(8), dp(8), 0);
+        errorParams.setMargins(0, dp(74), dp(8), 0);
         viewportLayer.addView(rendererError, errorParams);
         return viewportLayer;
     }
@@ -760,23 +927,25 @@ public final class EngineActivity extends Activity {
 
     // ------------------------------------------------------------------ loading
     private void loadAvatarAsync() {
-        worker.execute(() -> {
+        Thread t = new Thread(() -> {
             try {
+                String apiKey = null;
+                try { apiKey = new CredentialVault(this).load(); } catch (Throwable ignored) { }
+                // Fetch official Roblox R6 & R15 KeyframeSequence animations in background
+                RobloxAnimations.loadFromRobloxAsync(getCacheDir(), apiKey, (lvl, msg) -> scene.logOutput(lvl, msg));
+
                 android.content.SharedPreferences sp = getSharedPreferences("settings", MODE_PRIVATE);
                 long uid = sp.getLong("lastUserId", 0);
                 String uname = sp.getString("lastUsername", "Player");
                 RobloxApi api = new RobloxApi();
-                if (uid <= 0) {
-                    String key = new CredentialVault(this).load();
-                    if (key != null && !key.isEmpty()) {
-                        RobloxApi.Session s = api.login(key);
-                        uid = s.userId;
-                        uname = s.username;
-                        sp.edit().putLong("lastUserId", uid).putString("lastUsername", uname).apply();
-                    }
+                if (uid <= 0 && apiKey != null && !apiKey.isEmpty()) {
+                    RobloxApi.Session s = api.login(apiKey);
+                    uid = s.userId;
+                    uname = s.username;
+                    sp.edit().putLong("lastUserId", uid).putString("lastUsername", uname).apply();
                 }
                 if (uid > 0) {
-                    AvatarProfile av = AvatarProfile.fetchForUser(api, uid, uname);
+                    AvatarProfile av = AvatarProfile.fetchForUser(api, apiKey, uid, uname);
                     scene.avatar = av;
                     scene.use3dAvatar = av.mesh3d != null;
                     scene.logOutput("info", av.statusSummary());
@@ -785,7 +954,9 @@ public final class EngineActivity extends Activity {
                     });
                 }
             } catch (Throwable ignored) { }
-        });
+        }, "RobloxAvatarLoader");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void load() {
@@ -805,6 +976,7 @@ public final class EngineActivity extends Activity {
                         out.write(buffer, 0, n);
                     }
                 }
+                runOnUiThread(() -> { if (loadingStatus != null) loadingStatus.setText("Decoding place instances & lighting…"); });
                 PlaceDecoder.Result result = PlaceDecoder.decode(tmp);
                 runOnUiThread(() -> {
                     if (isFinishing()) return;
@@ -824,6 +996,8 @@ public final class EngineActivity extends Activity {
                         if (first != null) { scene.selection = first; scene.focus(first); }
                         refresh();
                         savedVersion = scene.version;
+                        if (viewCube != null) viewCube.setAngles(scene.camYaw, scene.camPitch);
+                        hideLoadingOverlay();
                         if (autoPlay) startPlay();
                     } catch (Throwable failure) {
                         fail(RobloxApi.safe(failure));
@@ -838,6 +1012,7 @@ public final class EngineActivity extends Activity {
 
     private void fail(String message) {
         loading = false;
+        hideLoadingOverlay();
         loadError = message;
         subtitle.setText("Could not open this place");
         propertyList.removeAllViews();
@@ -1723,6 +1898,8 @@ public final class EngineActivity extends Activity {
         }
         if (toolStrip != null) ((View) toolStrip.getParent()).setVisibility(View.GONE);
         if (flySpeedPill != null) flySpeedPill.setVisibility(View.GONE);
+        if (viewCube != null) viewCube.setVisibility(View.GONE);
+        if (bottomCmdBar != null) bottomCmdBar.setVisibility(View.GONE);
         scene.startPlay();
         playControls.setVisibility(View.VISIBLE);
         if (liftPad != null) liftPad.setVisibility(View.GONE);
@@ -1749,10 +1926,12 @@ public final class EngineActivity extends Activity {
         if (guiOverlay != null) guiOverlay.removeAllViews();
         if (toolStrip != null) ((View) toolStrip.getParent()).setVisibility(View.VISIBLE);
         if (flySpeedPill != null) flySpeedPill.setVisibility(View.VISIBLE);
+        if (viewCube != null) viewCube.setVisibility(View.VISIBLE);
+        if (bottomCmdBar != null) bottomCmdBar.setVisibility(View.VISIBLE);
         if (liftPad != null) liftPad.setVisibility(View.VISIBLE);
         flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Play");
-        if (playButtonContainer != null) playButtonContainer.setBackground(shape(0xff1e8e5a, 20));
+        if (playButtonContainer != null) playButtonContainer.setBackground(shape(0xff00a2ff, 6));
         if (playIconView != null) {
             playButtonContainer.removeView(playIconView);
             playIconView = new StudioIcon(this, "play", 0xffffffff);
