@@ -40,20 +40,34 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
     // ---------------------------------------------------------------- shaders
     private static final String VERT =
-            "uniform mat4 uMvp; uniform mat4 uModel; uniform mat3 uNormal; uniform float uUseCustomNorm; attribute vec3 aPos; attribute vec3 aLocal; attribute float aFace;\n" +
-            "varying vec3 vNormal; varying vec3 vWorld; varying vec3 vLocal; varying float vFace;\n" +
+            "uniform mat4 uMvp; uniform mat4 uModel; uniform mat3 uNormal; uniform mat4 uLightVp; uniform float uUseCustomNorm; attribute vec3 aPos; attribute vec3 aLocal; attribute float aFace;\n" +
+            "varying vec3 vNormal; varying vec3 vWorld; varying vec3 vLocal; varying float vFace; varying vec4 vShadowPos;\n" +
             "vec3 localNormal(vec3 p){\n" +
             "  vec3 a = abs(p);\n" +
             "  if (a.x >= a.y && a.x >= a.z) return vec3(p.x < 0.0 ? -1.0 : 1.0, 0.0, 0.0);\n" +
             "  if (a.y >= a.z) return vec3(0.0, p.y < 0.0 ? -1.0 : 1.0, 0.0);\n" +
             "  return vec3(0.0, 0.0, p.z < 0.0 ? -1.0 : 1.0);\n" +
             "}\n" +
-            "void main(){ vec3 ln = uUseCustomNorm > 0.5 ? normalize(aLocal) : localNormal(aLocal); vNormal=uNormal*ln; vWorld=(uModel*vec4(aPos,1.0)).xyz; vLocal=aPos; vFace=aFace;\n" +
+            "void main(){ vec3 ln = uUseCustomNorm > 0.5 ? normalize(aLocal) : localNormal(aLocal); vNormal=uNormal*ln; vec4 wp = uModel*vec4(aPos,1.0); vWorld=wp.xyz; vLocal=aPos; vFace=aFace; vShadowPos=uLightVp*wp;\n" +
             "  gl_Position=uMvp*vec4(aPos,1.0); }";
 
     private static final String FRAG =
-            "precision mediump float;\n" +
-            "varying vec3 vNormal; varying vec3 vWorld; varying vec3 vLocal; varying float vFace;\n" +
+            "precision highp float;\n" +
+            "varying vec3 vNormal; varying vec3 vWorld; varying vec3 vLocal; varying float vFace; varying vec4 vShadowPos;\n" +
+            "uniform sampler2D uShadowMap; uniform float uHasShadow;\n" +
+            "float unpackDepth(vec4 rgba){ return dot(rgba, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0)); }\n" +
+            "float calcShadow(vec4 sp, float ndl){\n" +
+            "  if (uHasShadow < 0.5) return 0.0;\n" +
+            "  vec3 proj = sp.xyz / max(sp.w, 0.0001) * 0.5 + 0.5;\n" +
+            "  if (proj.x < 0.01 || proj.x > 0.99 || proj.y < 0.01 || proj.y > 0.99 || proj.z > 0.99) return 0.0;\n" +
+            "  float bias = max(0.0025 * (1.0 - ndl), 0.0012);\n" +
+            "  float s = 0.0; float texel = 1.0 / 1024.0;\n" +
+            "  s += (proj.z - bias > unpackDepth(texture2D(uShadowMap, proj.xy + vec2(-texel, -texel)))) ? 1.0 : 0.0;\n" +
+            "  s += (proj.z - bias > unpackDepth(texture2D(uShadowMap, proj.xy + vec2( texel, -texel)))) ? 1.0 : 0.0;\n" +
+            "  s += (proj.z - bias > unpackDepth(texture2D(uShadowMap, proj.xy + vec2(-texel,  texel)))) ? 1.0 : 0.0;\n" +
+            "  s += (proj.z - bias > unpackDepth(texture2D(uShadowMap, proj.xy + vec2( texel,  texel)))) ? 1.0 : 0.0;\n" +
+            "  return s * 0.25;\n" +
+            "}\n" +
             "uniform vec3 uColor; uniform float uAlpha;\n" +
             "uniform vec3 uAmbient; uniform vec3 uSunDir; uniform vec3 uSunColor; uniform float uSunGain;\n" +
             "uniform vec3 uShiftTop; uniform vec3 uShiftBottom; uniform vec3 uEye;\n" +
@@ -87,16 +101,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec2 atlasUv = tile.xy * uAtlasStep + (cell * (1.0 - 2.0 * EDGE) + EDGE) * uAtlasStep;\n" +
             "  vec3 base = uColor;\n" +
             "  if (uIsBaseplate > 0.5 && n.y > 0.5) {\n" +
-            "    float distFade = 1.0 - smoothstep(45.0, 260.0, length(uEye - vWorld));\n" +
+            "    float distFade = 1.0 - smoothstep(55.0, 320.0, length(uEye - vWorld));\n" +
             "    vec2 g1 = abs(fract(vWorld.xz - 0.5) - 0.5);\n" +
-            "    float line1 = 1.0 - smoothstep(0.025, 0.06, min(g1.x, g1.y));\n" +
+            "    float line1 = 1.0 - smoothstep(0.018, 0.042, min(g1.x, g1.y));\n" +
             "    vec2 g4 = abs(fract(vWorld.xz * 0.25 - 0.5) - 0.5);\n" +
-            "    float line4 = 1.0 - smoothstep(0.012, 0.028, min(g4.x, g4.y));\n" +
-            "    vec2 studUv = fract(vWorld.xz) - 0.5;\n" +
-            "    float sr = length(studUv);\n" +
-            "    float studRing = smoothstep(0.32, 0.27, sr) - smoothstep(0.24, 0.20, sr);\n" +
-            "    float studTop = smoothstep(0.23, 0.18, sr);\n" +
-            "    base = uColor * (1.0 - (line1 * 0.09 + line4 * 0.16 + studRing * 0.07) * distFade + studTop * 0.035 * distFade);\n" +
+            "    float line4 = 1.0 - smoothstep(0.009, 0.022, min(g4.x, g4.y));\n" +
+            "    vec2 checker = floor(vWorld.xz * 0.25);\n" +
+            "    float tileShade = mod(checker.x + checker.y, 2.0) * 0.028;\n" +
+            "    vec3 studioSlate = uColor * vec3(0.68, 0.70, 0.73);\n" +
+            "    base = studioSlate * (1.0 - (line1 * 0.07 + line4 * 0.18 + tileShade) * distFade);\n" +
             "  } else if (tile.w > 0.5) {\n" +
             "    base *= texture2D(uAtlas, atlasUv).rgb;\n" +
             "  }\n" +
@@ -105,7 +118,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  float hemi = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);\n" +
             "  vec3 skyAmbient = mix(uAmbient * 0.65 + vec3(0.08, 0.08, 0.09), uAmbient * 0.95 + vec3(0.14, 0.18, 0.24), hemi);\n" +
             "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
-            "  vec3 light = skyAmbient + uSunColor * ndl * uSunGain * 0.95;\n" +
+            "  float shadow = calcShadow(vShadowPos, ndl);\n" +
+            "  vec3 light = skyAmbient + uSunColor * ndl * uSunGain * 0.95 * (1.0 - shadow * 0.62);\n" +
             "  light += uShiftTop * ndl * 0.4 + uShiftBottom * (1.0 - ndl) * 0.3;\n" +
             "  for (int i = 0; i < 4; i++) {\n" +
             "    float used = i < uLightCount ? 1.0 : 0.0;\n" +
@@ -139,6 +153,13 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  gl_FragColor = vec4(mix(col, uFogColor, fog), uAlpha);\n" +
             "}";
 
+    private static final String SHADOW_VERT =
+            "uniform mat4 uLightMvp; attribute vec3 aPos; varying float vDepth;\n" +
+            "void main(){ vec4 p = uLightMvp * vec4(aPos, 1.0); vDepth = p.z / p.w * 0.5 + 0.5; gl_Position = p; }";
+    private static final String SHADOW_FRAG =
+            "precision highp float; varying float vDepth;\n" +
+            "vec4 packDepth(float d){ vec4 enc = fract(vec4(1.0, 255.0, 65025.0, 16581375.0) * d); enc -= enc.yzww * vec4(1.0/255.0, 1.0/255.0, 1.0/255.0, 0.0); return enc; }\n" +
+            "void main(){ gl_FragColor = packDepth(clamp(vDepth, 0.0, 1.0)); }";
     private static final String LINE_VERT = "uniform mat4 uMvp; attribute vec3 aPos; void main(){ gl_Position=uMvp*vec4(aPos,1.0); }";
     private static final String LINE_FRAG = "precision mediump float; uniform vec3 uColor; uniform float uAlpha; void main(){ gl_FragColor=vec4(uColor,uAlpha); }";
 
@@ -220,8 +241,12 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0); }";
 
     // ---------------------------------------------------------------- programs
-    private int program, lineProgram, skyProgram, brightProgram, blurProgram, raysProgram, postProgram;
-    private int aPos, aLocal, aFace, uMvp, uModel, uNormal, uUseCustomNorm, uColor, uAlpha;
+    private int program, shadowProgram, lineProgram, skyProgram, brightProgram, blurProgram, raysProgram, postProgram;
+    private int aPos, aLocal, aFace, uMvp, uModel, uNormal, uLightVp, uShadowMap, uHasShadow, uUseCustomNorm, uColor, uAlpha;
+    private int shPos, shLightMvp;
+    private int shadowFbo, shadowTex, shadowDepthRb;
+    private boolean shadowReady;
+    private final float[] mLightView = new float[16], mLightProj = new float[16], mLightVp = new float[16], mLightMvp = new float[16];
     private int uAmbient, uSunDir, uSunColor, uSunGain, uShiftTop, uShiftBottom, uEye, uRough, uMetal, uEmissive, uShininess, uSpecular;
     private int uFogColor, uFogRange, uFogEnabled, uLightPos, uLightColor, uLightDir, uLightParams, uLightCount;
     private int uAtlas, uAtlasStep, uFaceTiles, uSpawnTile, uIsSpawn, uIsBaseplate, uAsset, uHasAsset, uAssetTiles, uAssetFace;
@@ -297,6 +322,12 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             uMvp = GLES20.glGetUniformLocation(program, "uMvp");
             uModel = GLES20.glGetUniformLocation(program, "uModel");
             uNormal = GLES20.glGetUniformLocation(program, "uNormal");
+            uLightVp = GLES20.glGetUniformLocation(program, "uLightVp");
+            uShadowMap = GLES20.glGetUniformLocation(program, "uShadowMap");
+            uHasShadow = GLES20.glGetUniformLocation(program, "uHasShadow");
+            shadowProgram = build(SHADOW_VERT, SHADOW_FRAG);
+            shPos = GLES20.glGetAttribLocation(shadowProgram, "aPos");
+            shLightMvp = GLES20.glGetUniformLocation(shadowProgram, "uLightMvp");
             uUseCustomNorm = GLES20.glGetUniformLocation(program, "uUseCustomNorm");
             uColor = GLES20.glGetUniformLocation(program, "uColor");
             uAlpha = GLES20.glGetUniformLocation(program, "uAlpha");
@@ -399,6 +430,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             buildGrid();
             buildQuad();
             textures.buildAtlas();
+            initShadowMap();
             releaseTargets();
         } catch (Throwable t) {
             fail("creating the GL pipeline", t);
@@ -441,7 +473,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
                 v++;
             }
         }
-        short[] idx = {0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 8, 9, 10, 8, 10, 11, 12, 14, 13, 12, 15, 14, 16, 17, 18, 16, 18, 19, 20, 22, 21, 20, 23, 22};
+        short[] idx = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 13, 14, 12, 14, 15, 16, 17, 18, 16, 18, 19, 20, 21, 22, 20, 22, 23};
         cubePositions = floatBuffer(p);
         cubeNormals = floatBuffer(n);
         faceBuffer = floatBuffer(f);
@@ -661,6 +693,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             extractFrustum(mVp);
             synchronized (scene) { System.arraycopy(mVp, 0, scene.viewProjection, 0, 16); }
 
+            if (light.globalShadows && shadowReady) renderShadowPass(light);
             boolean post = light.needsPost() && ensureTargets(viewportWidth, viewportHeight);
             if (post) {
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, sceneFbo);
@@ -703,6 +736,13 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform3f(uFogColor, (float) light.fogTint[0], (float) light.fogTint[1], (float) light.fogTint[2]);
         GLES20.glUniform2f(uFogRange, (float) light.fogStart, (float) light.fogEnd);
         GLES20.glUniform1f(uFogEnabled, light.fogEnabled ? 1f : 0f);
+        if (uLightVp >= 0) GLES20.glUniformMatrix4fv(uLightVp, 1, false, mLightVp, 0);
+        if (uShadowMap >= 0) {
+            GLES20.glUniform1i(uShadowMap, 3);
+            if (shadowReady && light.globalShadows) bindTexture(3, shadowTex);
+            else bindTexture(3, textures.atlasTexture());
+        }
+        if (uHasShadow >= 0) GLES20.glUniform1f(uHasShadow, (shadowReady && light.globalShadows) ? 1f : 0f);
 
         int count = 0;
         for (EngineLighting.Light local : light.lights) {
@@ -727,6 +767,70 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform3fv(uLightDir, MAX_LIGHTS, lightDir, 0);
         GLES20.glUniform4fv(uLightParams, MAX_LIGHTS, lightParams, 0);
         GLES20.glUniform1i(uLightCount, count);
+    }
+
+    private void initShadowMap() {
+        try {
+            shadowTex = texture(1024, 1024);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, shadowTex);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST);
+            shadowFbo = framebuffer(shadowTex);
+            int[] rbs = new int[1];
+            GLES20.glGenRenderbuffers(1, rbs, 0);
+            shadowDepthRb = rbs[0];
+            GLES20.glBindRenderbuffer(GLES20.GL_RENDERBUFFER, shadowDepthRb);
+            GLES20.glRenderbufferStorage(GLES20.GL_RENDERBUFFER, GLES20.GL_DEPTH_COMPONENT16, 1024, 1024);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, shadowFbo);
+            GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_DEPTH_ATTACHMENT, GLES20.GL_RENDERBUFFER, shadowDepthRb);
+            shadowReady = complete(shadowFbo);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        } catch (Throwable ignored) {
+            shadowReady = false;
+        }
+    }
+
+    private void renderShadowPass(EngineLighting light) {
+        float cx = (float) (scene.playing ? scene.charPos[0] : scene.camTarget[0]);
+        float cy = (float) (scene.playing ? scene.charPos[1] : scene.camTarget[1]);
+        float cz = (float) (scene.playing ? scene.charPos[2] : scene.camTarget[2]);
+        float sx = (float) light.sunDirection[0], sy = (float) Math.max(0.25, light.sunDirection[1]), sz = (float) light.sunDirection[2];
+        float sl = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
+        sx /= sl; sy /= sl; sz /= sl;
+        Matrix.setLookAtM(mLightView, 0, cx + sx * 90f, cy + sy * 90f, cz + sz * 90f, cx, cy, cz, 0f, 1f, 0f);
+        Matrix.orthoM(mLightProj, 0, -55f, 55f, -55f, 55f, 10f, 220f);
+        Matrix.multiplyMM(mLightVp, 0, mLightProj, 0, mLightView, 0);
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, shadowFbo);
+        GLES20.glViewport(0, 0, 1024, 1024);
+        GLES20.glClearColor(1f, 1f, 1f, 1f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glUseProgram(shadowProgram);
+        GLES20.glEnableVertexAttribArray(shPos);
+
+        for (Instance part : frameList) {
+            if (!part.getBool("CastShadow", true) || part.getNumber("Transparency", 0) > 0.8) continue;
+            double[] s = part.size();
+            if ("Baseplate".equalsIgnoreCase(part.name) || (Math.abs(s[0]) >= 100 && Math.abs(s[2]) >= 100)) continue;
+            setModel(part.cframe(), (float) Math.max(0.02, Math.abs(s[0])), (float) Math.max(0.02, Math.abs(s[1])), (float) Math.max(0.02, Math.abs(s[2])));
+            Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
+            GLES20.glUniformMatrix4fv(shLightMvp, 1, false, mLightMvp, 0);
+            GLES20.glVertexAttribPointer(shPos, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
+            GLES20.glDrawElements(GLES20.GL_TRIANGLES, 36, GLES20.GL_UNSIGNED_SHORT, cubeIndices);
+        }
+        if (scene.playing) {
+            double[] p = scene.charPos;
+            double[] cc = {p[0], p[1] - scene.charHy + 2.6, p[2], 1, 0, 0, 0, 1, 0, 0, 0, 1};
+            setModel(cc, 2.2f, 5.0f, 1.2f);
+            Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
+            GLES20.glUniformMatrix4fv(shLightMvp, 1, false, mLightMvp, 0);
+            GLES20.glVertexAttribPointer(shPos, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
+            GLES20.glDrawElements(GLES20.GL_TRIANGLES, 36, GLES20.GL_UNSIGNED_SHORT, cubeIndices);
+        }
+        GLES20.glDisableVertexAttribArray(shPos);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
 
     private void bindAtlas() {
@@ -1089,9 +1193,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float[] eyeCol = {0.07f, 0.08f, 0.11f};
         float[] shadowCol = {0.05f, 0.06f, 0.08f};
 
-        if (scene.onGround) {
-            charPart(p, cy, sy, 0, 0.04f, 0, 0, 0, 2.0f * ws, 0.03f, 1.5f * ds, shadowCol, skin, light, 0);
-        }
+
 
         // Classic Roblox beveled head (blocky cylinder feel, not a plain ball) + optional hair cap
         float headY = 4.62f * hs + bob;

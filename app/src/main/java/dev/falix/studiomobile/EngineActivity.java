@@ -744,12 +744,27 @@ public final class EngineActivity extends Activity {
 
     // ------------------------------------------------------------------ loading
     private void loadAvatarAsync() {
-        final long uid = getSharedPreferences("settings", MODE_PRIVATE).getLong("lastUserId", 0);
-        final String uname = getSharedPreferences("settings", MODE_PRIVATE).getString("lastUsername", "Player");
-        if (uid <= 0) return;
         worker.execute(() -> {
-            AvatarProfile av = AvatarProfile.fetchForUser(new RobloxApi(), uid, uname);
-            scene.avatar = av;
+            try {
+                android.content.SharedPreferences sp = getSharedPreferences("settings", MODE_PRIVATE);
+                long uid = sp.getLong("lastUserId", 0);
+                String uname = sp.getString("lastUsername", "Player");
+                RobloxApi api = new RobloxApi();
+                if (uid <= 0) {
+                    String key = new CredentialVault(this).load();
+                    if (key != null && !key.isEmpty()) {
+                        RobloxApi.Session s = api.login(key);
+                        uid = s.userId;
+                        uname = s.username;
+                        sp.edit().putLong("lastUserId", uid).putString("lastUsername", uname).apply();
+                    }
+                }
+                if (uid > 0) {
+                    AvatarProfile av = AvatarProfile.fetchForUser(api, uid, uname);
+                    scene.avatar = av;
+                    scene.logOutput("info", "Loaded avatar @" + av.username + " (" + (av.isR15 ? "R15" : "R6") + ", " + av.assetCount + " items)");
+                }
+            } catch (Throwable ignored) { }
         });
     }
 
