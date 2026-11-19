@@ -63,7 +63,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "uniform vec3 uLightPos[4]; uniform vec3 uLightColor[4]; uniform vec3 uLightDir[4]; uniform vec4 uLightParams[4];\n" +
             "uniform int uLightCount;\n" +
             "uniform sampler2D uAtlas; uniform float uAtlasStep; uniform vec4 uFaceTiles[6];\n" +
-            "uniform vec4 uSpawnTile; uniform float uIsSpawn;\n" +
+            "uniform vec4 uSpawnTile; uniform float uIsSpawn; uniform float uIsBaseplate;\n" +
             "uniform sampler2D uAsset; uniform float uHasAsset; uniform vec2 uAssetTiles; uniform float uAssetFace;\n" +
             "void main(){\n" +
             "  vec3 n = normalize(vNormal);\n" +
@@ -86,16 +86,27 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec2 cell = spawnFace ? faceUv : fract(planar * tile.z);\n" +
             "  vec2 atlasUv = tile.xy * uAtlasStep + (cell * (1.0 - 2.0 * EDGE) + EDGE) * uAtlasStep;\n" +
             "  vec3 base = uColor;\n" +
-            "  if (tile.w > 0.5) base *= texture2D(uAtlas, atlasUv).rgb;\n" +
+            "  if (uIsBaseplate > 0.5 && n.y > 0.5) {\n" +
+            "    float distFade = 1.0 - smoothstep(45.0, 260.0, length(uEye - vWorld));\n" +
+            "    vec2 g1 = abs(fract(vWorld.xz - 0.5) - 0.5);\n" +
+            "    float line1 = 1.0 - smoothstep(0.025, 0.06, min(g1.x, g1.y));\n" +
+            "    vec2 g4 = abs(fract(vWorld.xz * 0.25 - 0.5) - 0.5);\n" +
+            "    float line4 = 1.0 - smoothstep(0.012, 0.028, min(g4.x, g4.y));\n" +
+            "    vec2 studUv = fract(vWorld.xz) - 0.5;\n" +
+            "    float sr = length(studUv);\n" +
+            "    float studRing = smoothstep(0.32, 0.27, sr) - smoothstep(0.24, 0.20, sr);\n" +
+            "    float studTop = smoothstep(0.23, 0.18, sr);\n" +
+            "    base = uColor * (1.0 - (line1 * 0.09 + line4 * 0.16 + studRing * 0.07) * distFade + studTop * 0.035 * distFade);\n" +
+            "  } else if (tile.w > 0.5) {\n" +
+            "    base *= texture2D(uAtlas, atlasUv).rgb;\n" +
+            "  }\n" +
             "  float assetMask = (uAssetFace < -0.5 || abs(uAssetFace - vFace) < 0.5) ? uHasAsset : 0.0;\n" +
             "  if (assetMask > 0.0) base = mix(base, texture2D(uAsset, faceUv * uAssetTiles).rgb, assetMask);\n" +
             "  float hemi = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);\n" +
-            "  vec3 skyFill = max(uAmbient, vec3(0.28, 0.31, 0.36));\n" +
-            "  vec3 ambient = mix(skyFill * 0.62, skyFill * 1.12, hemi);\n" +
+            "  vec3 skyAmbient = mix(uAmbient * 0.65 + vec3(0.08, 0.08, 0.09), uAmbient * 0.95 + vec3(0.14, 0.18, 0.24), hemi);\n" +
             "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
-            "  float wrap = max((dot(n, uSunDir) + 0.25) / 1.25, 0.0);\n" +
-            "  vec3 light = ambient + uSunColor * (ndl * 0.88 + wrap * 0.14) * uSunGain;\n" +
-            "  light += uShiftTop * ndl * 0.45 + uShiftBottom * (1.0 - ndl) * 0.35;\n" +
+            "  vec3 light = skyAmbient + uSunColor * ndl * uSunGain * 0.95;\n" +
+            "  light += uShiftTop * ndl * 0.4 + uShiftBottom * (1.0 - ndl) * 0.3;\n" +
             "  for (int i = 0; i < 4; i++) {\n" +
             "    float used = i < uLightCount ? 1.0 : 0.0;\n" +
             "    vec3 toLight = uLightPos[i] - vWorld;\n" +
@@ -119,10 +130,10 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec3 hv = normalize(view + uSunDir);\n" +
             "  float spec = pow(max(dot(n, hv), 0.0), uShininess) * (1.0 - uRough * 0.5);\n" +
             "  vec3 specColour = mix(vec3(0.04), base, uMetal);\n" +
-            "  float fresnel = pow(1.0 - max(dot(n, view), 0.0), 4.0) * (1.0 - uRough * 0.65);\n" +
-            "  vec3 col = base * light * (1.0 - uMetal * 0.55) + specColour * (spec + fresnel * 0.22) * uSpecular * (uSunGain * 1.1 + 0.25)\n" +
-            "           + base * uEmissive * 1.4;\n" +
-            "  col = col / (col + vec3(0.85)) * 1.55;\n" +
+            "  float fresnel = pow(1.0 - max(dot(n, view), 0.0), 4.0) * (1.0 - uRough * 0.7);\n" +
+            "  vec3 col = base * light * (1.0 - uMetal * 0.5) + specColour * (spec + fresnel * 0.18) * uSpecular * (uSunGain * 0.95 + 0.2)\n" +
+            "           + base * uEmissive * 1.45;\n" +
+            "  col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);\n" +
             "  float viewDist = length(uEye - vWorld);\n" +
             "  float fog = uFogEnabled * clamp((viewDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.001), 0.0, 1.0);\n" +
             "  gl_FragColor = vec4(mix(col, uFogColor, fog), uAlpha);\n" +
@@ -134,7 +145,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private static final String QUAD_VERT = "attribute vec2 aPos; varying vec2 vUv; void main(){ vUv=aPos*0.5+0.5; gl_Position=vec4(aPos,0.0,1.0); }";
 
     private static final String SKY_FRAG =
-            "precision mediump float;\n" +
+            "precision highp float;\n" +
             "varying vec2 vUv;\n" +
             "uniform vec3 uRayTL, uRayTR, uRayBL, uRayBR;\n" +
             "uniform vec3 uSunDir, uSunColor, uSkyTop, uSkyHorizon, uSkyGround, uAtmosphereColor, uCloudColor;\n" +
@@ -142,32 +153,33 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "uniform float uAtmoDensity, uAtmoHaze, uAtmoGlare, uAtmoOffset, uAtmoDecay;\n" +
             "uniform float uCloudCover, uCloudDensity, uCloudTime;\n" +
             "uniform samplerCube uSkyCube; uniform float uUseSkyCube;\n" +
-            "float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }\n" +
+            "float hash(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }\n" +
             "float noise(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n" +
             "  return mix(mix(hash(i), hash(i+vec2(1.0,0.0)), u.x), mix(hash(i+vec2(0.0,1.0)), hash(i+vec2(1.0,1.0)), u.x), u.y); }\n" +
-            "float fbm(vec2 p){ float v=0.0, a=0.5; for (int i=0;i<4;i++){ v+=a*noise(p); p*=2.03; a*=0.5; } return v; }\n" +
+            "float fbm(vec2 p){ float v=0.0, a=0.5; for (int i=0;i<4;i++){ v+=a*noise(p); p=p*2.02+vec2(13.7, 9.2); a*=0.5; } return v; }\n" +
             "void main(){\n" +
             "  vec3 dir = normalize(mix(mix(uRayBL, uRayBR, vUv.x), mix(uRayTL, uRayTR, vUv.x), vUv.y));\n" +
             "  float h = dir.y;\n" +
-            "  vec3 col = h >= 0.0 ? mix(uSkyHorizon, uSkyTop, pow(clamp(h, 0.0, 1.0), 0.55))\n" +
+            "  vec3 col = h >= 0.0 ? mix(uSkyHorizon, uSkyTop, pow(clamp(h, 0.0, 1.0), 0.52))\n" +
             "                      : mix(uSkyHorizon, uSkyGround, clamp(-h * 3.5, 0.0, 1.0));\n" +
             "  if (uUseSkyCube > 0.5) col = textureCube(uSkyCube, dir).rgb;\n" +
             "  float cs = max(dot(dir, uSunDir), 0.0);\n" +
-            "  float disc = uSunAngular > 0.01 ? smoothstep(cos(radians(uSunAngular)), cos(radians(uSunAngular * 0.72)), cs) : 0.0;\n" +
-            "  col += uSunColor * (disc * 1.6 + pow(cs, 90.0) * 0.5);\n" +
+            "  float disc = uSunAngular > 0.01 ? smoothstep(cos(radians(uSunAngular * 0.45)), cos(radians(uSunAngular * 0.32)), cs) : 0.0;\n" +
+            "  col += uSunColor * (disc * 1.4 + pow(cs, 64.0) * 0.45);\n" +
             "  float haze = clamp(uAtmoHaze, 0.0, 3.0) * uAtmoDensity;\n" +
-            "  float band = clamp(1.0 - abs(h) * (1.6 + uAtmoOffset), 0.0, 1.0);\n" +
-            "  col = mix(col, uAtmosphereColor * (0.55 + 0.45 * max(h, 0.0)), clamp(haze * band * 0.9, 0.0, 1.0));\n" +
-            "  col += uAtmosphereColor * pow(cs, 8.0) * uAtmoGlare * haze * 0.8;\n" +
-            "  col = mix(col, col * uAtmosphereColor * (1.0 + uAtmoDecay), clamp((1.0 - cs) * haze * 0.15, 0.0, 0.6));\n" +
-            "  if (uCloudCover > 0.001 && h > 0.0) {\n" +
-            "    vec2 uv = dir.xz / max(h, 0.12) * 0.16 + vec2(uCloudTime * 0.006, uCloudTime * 0.004);\n" +
-            "    float mask = smoothstep(1.0 - uCloudCover, 1.0 - uCloudCover + 0.22, fbm(uv * 1.4)) * smoothstep(0.0, 0.16, h);\n" +
-            "    col = mix(col, uCloudColor * (0.72 + 0.28 * fbm(uv * 1.9)), mask * uCloudDensity);\n" +
+            "  float band = clamp(1.0 - abs(h) * (1.8 + uAtmoOffset), 0.0, 1.0);\n" +
+            "  col = mix(col, uAtmosphereColor * (0.65 + 0.35 * max(h, 0.0)), clamp(haze * band * 0.85, 0.0, 1.0));\n" +
+            "  col += uAtmosphereColor * pow(cs, 8.0) * uAtmoGlare * haze * 0.7;\n" +
+            "  if (uCloudCover > 0.001 && h > 0.02) {\n" +
+            "    vec2 uv = dir.xz / (h + 0.35) * 1.15 + vec2(uCloudTime * 0.012, uCloudTime * 0.007);\n" +
+            "    float n = fbm(uv);\n" +
+            "    float thresh = mix(0.75, 0.38, clamp(uCloudCover, 0.0, 1.0));\n" +
+            "    float mask = smoothstep(thresh, thresh + 0.24, n) * smoothstep(0.02, 0.25, h);\n" +
+            "    col = mix(col, uCloudColor * (0.85 + 0.15 * n), mask * uCloudDensity * 0.75);\n" +
             "  }\n" +
-            "  if (uUseSkyCube < 0.5 && uCelestial > 0.5 && h > 0.01 && uStarCount > 0.0) {\n" +
-            "    float s = hash(floor(dir.xz / max(h, 0.08) * 60.0));\n" +
-            "    col += vec3(step(1.0 - uStarCount / 400000.0, s) * (1.0 - uDayFactor) * smoothstep(0.0, 0.2, h) * 0.9);\n" +
+            "  if (uUseSkyCube < 0.5 && uCelestial > 0.5 && h > 0.02 && uStarCount > 0.0) {\n" +
+            "    float s = hash(floor(dir.xz / (h + 0.25) * 90.0));\n" +
+            "    col += vec3(step(1.0 - uStarCount / 400000.0, s) * (1.0 - uDayFactor) * smoothstep(0.02, 0.22, h) * 0.9);\n" +
             "  }\n" +
             "  gl_FragColor = vec4(col, 1.0);\n" +
             "}";
@@ -212,7 +224,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private int aPos, aLocal, aFace, uMvp, uModel, uNormal, uUseCustomNorm, uColor, uAlpha;
     private int uAmbient, uSunDir, uSunColor, uSunGain, uShiftTop, uShiftBottom, uEye, uRough, uMetal, uEmissive, uShininess, uSpecular;
     private int uFogColor, uFogRange, uFogEnabled, uLightPos, uLightColor, uLightDir, uLightParams, uLightCount;
-    private int uAtlas, uAtlasStep, uFaceTiles, uSpawnTile, uIsSpawn, uAsset, uHasAsset, uAssetTiles, uAssetFace;
+    private int uAtlas, uAtlasStep, uFaceTiles, uSpawnTile, uIsSpawn, uIsBaseplate, uAsset, uHasAsset, uAssetTiles, uAssetFace;
     private int lPos, lMvp, lColor, lAlpha;
     private int qPos, brightPos, blurPos, raysPos, postPos;
     private int sRayTL, sRayTR, sRayBL, sRayBR, sSunDir, sSunColor, sSkyTop, sSkyHorizon, sSkyGround, sAtmosphere, sCloudColor, sSkyCube, sUseSkyCube;
@@ -313,6 +325,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             uFaceTiles = GLES20.glGetUniformLocation(program, "uFaceTiles[0]");
             uSpawnTile = GLES20.glGetUniformLocation(program, "uSpawnTile");
             uIsSpawn = GLES20.glGetUniformLocation(program, "uIsSpawn");
+            uIsBaseplate = GLES20.glGetUniformLocation(program, "uIsBaseplate");
             uAsset = GLES20.glGetUniformLocation(program, "uAsset");
             uHasAsset = GLES20.glGetUniformLocation(program, "uHasAsset");
             uAssetTiles = GLES20.glGetUniformLocation(program, "uAssetTiles");
@@ -445,8 +458,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float[] out = new float[lines * 4 * 3];
         int i = 0;
         for (int v = -extent; v <= extent; v += step) {
-            out[i++] = v; out[i++] = 0; out[i++] = -extent; out[i++] = v; out[i++] = 0; out[i++] = extent;
-            out[i++] = -extent; out[i++] = 0; out[i++] = v; out[i++] = extent; out[i++] = 0; out[i++] = v;
+            out[i++] = v; out[i++] = 0.02f; out[i++] = -extent; out[i++] = v; out[i++] = 0.02f; out[i++] = extent;
+            out[i++] = -extent; out[i++] = 0.02f; out[i++] = v; out[i++] = extent; out[i++] = 0.02f; out[i++] = v;
         }
         gridVertices = i / 3;
         gridLines = floatBuffer(java.util.Arrays.copyOf(out, i));
@@ -659,7 +672,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
 
             drawSky(light);
-            drawGrid(light);
+            if (!scene.playing) drawGrid(light);
 
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
             GLES20.glEnable(GLES20.GL_BLEND);
@@ -667,7 +680,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             bindAtlas();
             for (Instance part : frameList) drawPart(part, light);
             Instance selected = scene.selection;
-            if (selected != null && selected.isRenderable()) drawOutline(selected);
+            if (!scene.playing && selected != null && selected.isRenderable()) drawOutline(selected);
             if (scene.playing) drawCharacter(light);
             drawGizmo(light);
 
@@ -931,6 +944,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             if (shape == 0) meshKind = 0;
             else if (shape == 2) meshKind = 2;
         }
+        boolean isBaseplate = !spawn && ("Baseplate".equalsIgnoreCase(part.name) || (sx >= 100f && sz >= 100f && sy <= 32f));
+        if (uIsBaseplate >= 0) GLES20.glUniform1f(uIsBaseplate, isBaseplate ? 1f : 0f);
         drawMesh(meshKind, r, g, b, alpha, material, light.specularScale + reflectance, spawn ? 1f : 0f,
                 assetTexture != 0 ? assetTexture : (sampleAtlas ? atlas : 0),
                 assetTexture != 0 ? 1f : 0f, assetFaceIndex);
@@ -1050,21 +1065,60 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
     private void drawCharacter(EngineLighting light) {
         if (scene.firstPerson) return;
+        if (uIsBaseplate >= 0) GLES20.glUniform1f(uIsBaseplate, 0f);
         AvatarProfile av = scene.avatar != null ? scene.avatar : AvatarProfile.defaultAvatar();
         double[] p = scene.charPos;
         double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
         float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
         EngineMaterial skin = EngineMaterial.of(256);
 
-        float hs = av.heightScale;
-        float ws = av.widthScale;
-        float ds = av.depthScale;
-        float hds = av.headScale;
+        float hs = av.isR15 ? av.heightScale : 1.0f;
+        float ws = av.isR15 ? av.widthScale : 1.0f;
+        float ds = av.isR15 ? av.depthScale : 1.0f;
+        float hds = av.isR15 ? av.headScale : 1.0f;
         float speedFrac = (float) Math.min(1.0, scene.charSpeed / Math.max(1.0, scene.walkSpeed));
-        float breath = (float) Math.sin(scene.idleTime * 2.4) * 0.03f * (1f - speedFrac);
-        float landSquash = scene.landTimer > 0 ? (float) Math.sin(scene.landTimer * Math.PI / 0.18) * 0.22f : 0f;
-        float swing = (float) Math.sin(scene.charWalkPhase) * 0.72f * speedFrac;
-        float bob = (scene.onGround ? Math.abs((float) Math.sin(scene.charWalkPhase)) * 0.16f * speedFrac : 0f) + breath - landSquash;
+        float breath = (float) Math.sin(scene.idleTime * 2.4) * 0.025f * (1f - speedFrac);
+        float landSquash = scene.landTimer > 0 ? (float) Math.sin(scene.landTimer * Math.PI / 0.18) * 0.20f : 0f;
+        float swing = (float) Math.sin(scene.charWalkPhase) * (av.isR15 ? 0.72f : 0.80f) * speedFrac;
+        float bob = (scene.onGround ? Math.abs((float) Math.sin(scene.charWalkPhase)) * 0.14f * speedFrac : 0f) + breath - landSquash;
+        float[] torsoCol = av.effectiveTorsoColor();
+        float[] lArmCol = av.effectiveLeftArmColor();
+        float[] rArmCol = av.effectiveRightArmColor();
+        float[] lLegCol = av.effectiveLeftLegColor();
+        float[] rLegCol = av.effectiveRightLegColor();
+        float[] eyeCol = {0.07f, 0.08f, 0.11f};
+        float[] shadowCol = {0.05f, 0.06f, 0.08f};
+
+        if (scene.onGround) {
+            charPart(p, cy, sy, 0, 0.04f, 0, 0, 0, 2.0f * ws, 0.03f, 1.5f * ds, shadowCol, skin, light, 0);
+        }
+
+        // Classic Roblox beveled head (blocky cylinder feel, not a plain ball) + optional hair cap
+        float headY = 4.62f * hs + bob;
+        charPart(p, cy, sy, 0, headY, 0, 0, 0, 1.16f * hds, 1.18f * hds, 1.16f * hds, av.headColor, skin, light, 1);
+        if (av.hasHair && av.hairColor != null) {
+            charPart(p, cy, sy, 0, headY + 0.44f * hds, -0.05f * hds, 0, 0, 1.24f * hds, 0.42f * hds, 1.24f * hds, av.hairColor, skin, light, 1);
+            charPart(p, cy, sy, 0, headY + 0.06f * hds, -0.56f * hds, 0, 0, 1.22f * hds, 0.92f * hds, 0.18f * hds, av.hairColor, skin, light, 1);
+        }
+        charPart(p, cy, sy, -0.22f * hds, headY + 0.10f * hds, 0.56f * hds, 0, 0, 0.12f * hds, 0.17f * hds, 0.08f * hds, eyeCol, skin, light, 1);
+        charPart(p, cy, sy, 0.22f * hds, headY + 0.10f * hds, 0.56f * hds, 0, 0, 0.12f * hds, 0.17f * hds, 0.08f * hds, eyeCol, skin, light, 1);
+        charPart(p, cy, sy, 0f, headY - 0.17f * hds, 0.56f * hds, 0, 0, 0.34f * hds, 0.07f * hds, 0.08f * hds, eyeCol, skin, light, 1);
+
+        if (!av.isR15) {
+            // Classic Roblox R6 Rig (6 rigid blocks with exact 2x2x1 torso and 1x2x1 limbs)
+            float armPitchL = scene.onGround ? -swing : -2.6f;
+            float armPitchR = scene.onGround ? swing : -2.6f;
+            float legPitchL = scene.onGround ? swing : 0.30f;
+            float legPitchR = scene.onGround ? -swing : -0.30f;
+            charPart(p, cy, sy, 0, 3.0f + bob, 0, 0, 0, 2.0f, 2.0f, 1.0f, torsoCol, skin, light, 1);
+            charPart(p, cy, sy, -1.5f, 4.0f + bob, 0, -1.0f, armPitchL, 1.0f, 2.0f, 1.0f, lArmCol, skin, light, 1);
+            charPart(p, cy, sy, 1.5f, 4.0f + bob, 0, -1.0f, armPitchR, 1.0f, 2.0f, 1.0f, rArmCol, skin, light, 1);
+            charPart(p, cy, sy, -0.5f, 2.0f + bob, 0, -1.0f, legPitchL, 1.0f, 2.0f, 1.0f, lLegCol, skin, light, 1);
+            charPart(p, cy, sy, 0.5f, 2.0f + bob, 0, -1.0f, legPitchR, 1.0f, 2.0f, 1.0f, rLegCol, skin, light, 1);
+            return;
+        }
+
+        // Articulated Roblox R15 Rig (Lower/UpperTorso + jointed Upper/Lower limbs)
         float torsoLean = speedFrac * 0.10f;
         float armPitchL = scene.onGround ? (-swing + (float) Math.sin(scene.idleTime * 2.4) * 0.04f * (1f - speedFrac)) : -2.45f;
         float armPitchR = scene.onGround ? (swing - (float) Math.sin(scene.idleTime * 2.4) * 0.04f * (1f - speedFrac)) : -2.45f;
@@ -1074,38 +1128,21 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float legPitchR = scene.onGround ? -swing : -0.28f;
         float kneeBendL = scene.onGround ? Math.max(0f, -legPitchL) * 0.75f + landSquash * 1.4f : 0.55f;
         float kneeBendR = scene.onGround ? Math.max(0f, -legPitchR) * 0.75f + landSquash * 1.4f : 0.45f;
-        float[] eyeCol = {0.07f, 0.08f, 0.11f};
-        float[] shadowCol = {0.05f, 0.06f, 0.08f};
 
-        // Ground contact shadow disc
-        if (scene.onGround) {
-            charPart(p, cy, sy, 0, 0.04f, 0, 0, 0, 2.1f * ws, 0.03f, 1.7f * ds, shadowCol, skin, light, 0);
-        }
+        charPart(p, cy, sy, 0, 2.25f * hs + bob, 0, 0, torsoLean * 0.5f, 1.95f * ws, 0.65f * hs, 0.98f * ds, torsoCol, skin, light, 1);
+        charPart(p, cy, sy, 0, 3.25f * hs + bob, 0, 0, torsoLean, 2.02f * ws, 1.38f * hs, 1.04f * ds, torsoCol, skin, light, 1);
 
-        // LowerTorso & UpperTorso (R15)
-        charPart(p, cy, sy, 0, 2.25f * hs + bob, 0, 0, torsoLean * 0.5f, 1.95f * ws, 0.65f * hs, 0.98f * ds, av.torsoColor, skin, light, 1);
-        charPart(p, cy, sy, 0, 3.25f * hs + bob, 0, 0, torsoLean, 2.02f * ws, 1.38f * hs, 1.04f * ds, av.torsoColor, skin, light, 1);
-
-        // Head + face
-        float headY = 4.58f * hs + bob;
-        charPart(p, cy, sy, 0, headY, 0, 0, 0, 1.18f * hds, 1.18f * hds, 1.18f * hds, av.headColor, skin, light, 0);
-        charPart(p, cy, sy, -0.22f * hds, headY + 0.10f * hds, 0.54f * hds, 0, 0, 0.13f * hds, 0.18f * hds, 0.10f * hds, eyeCol, skin, light, 1);
-        charPart(p, cy, sy, 0.22f * hds, headY + 0.10f * hds, 0.54f * hds, 0, 0, 0.13f * hds, 0.18f * hds, 0.10f * hds, eyeCol, skin, light, 1);
-        charPart(p, cy, sy, 0f, headY - 0.18f * hds, 0.54f * hds, 0, 0, 0.36f * hds, 0.07f * hds, 0.10f * hds, eyeCol, skin, light, 1);
-
-        // Articulated R15 Arms (UpperArm + LowerArm/Hand with elbow bend)
         float shoulderY = 3.88f * hs + bob;
         float armX = 1.48f * ws;
         float uArmH = 0.96f * hs, lArmH = 0.96f * hs;
-        drawLimbChain(p, cy, sy, -armX, shoulderY, 0, armPitchL, armPitchL - elbowBendL, uArmH, lArmH, 0.92f * ws, 0.92f * ds, av.leftArmColor, skin, light);
-        drawLimbChain(p, cy, sy, armX, shoulderY, 0, armPitchR, armPitchR - elbowBendR, uArmH, lArmH, 0.92f * ws, 0.92f * ds, av.rightArmColor, skin, light);
+        drawLimbChain(p, cy, sy, -armX, shoulderY, 0, armPitchL, armPitchL - elbowBendL, uArmH, lArmH, 0.92f * ws, 0.92f * ds, lArmCol, skin, light);
+        drawLimbChain(p, cy, sy, armX, shoulderY, 0, armPitchR, armPitchR - elbowBendR, uArmH, lArmH, 0.92f * ws, 0.92f * ds, rArmCol, skin, light);
 
-        // Articulated R15 Legs (UpperLeg + LowerLeg/Foot with knee bend)
         float hipY = 1.94f * hs + bob;
         float legX = 0.52f * ws;
         float uLegH = 0.98f * hs, lLegH = 0.98f * hs;
-        drawLimbChain(p, cy, sy, -legX, hipY, 0, legPitchL, legPitchL + kneeBendL, uLegH, lLegH, 0.94f * ws, 0.94f * ds, av.leftLegColor, skin, light);
-        drawLimbChain(p, cy, sy, legX, hipY, 0, legPitchR, legPitchR + kneeBendR, uLegH, lLegH, 0.94f * ws, 0.94f * ds, av.rightLegColor, skin, light);
+        drawLimbChain(p, cy, sy, -legX, hipY, 0, legPitchL, legPitchL + kneeBendL, uLegH, lLegH, 0.94f * ws, 0.94f * ds, lLegCol, skin, light);
+        drawLimbChain(p, cy, sy, legX, hipY, 0, legPitchR, legPitchR + kneeBendR, uLegH, lLegH, 0.94f * ws, 0.94f * ds, rLegCol, skin, light);
     }
 
     private void drawLimbChain(double[] origin, float cy, float sy, float ox, float pivotY, float oz,

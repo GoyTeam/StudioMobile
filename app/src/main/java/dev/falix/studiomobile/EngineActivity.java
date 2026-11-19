@@ -501,6 +501,16 @@ public final class EngineActivity extends Activity {
         hudRow.setBackground(shape(0xbb181c24, 12));
         healthLabel = text("HP 100/100", 11, true, 0xff7ce6a5);
         hudRow.addView(healthLabel);
+        final TextView rigPill = text(scene.avatar != null && !scene.avatar.isR15 ? "R6" : "R15", 10.5f, true, 0xffffffff);
+        rigPill.setPadding(dp(8), dp(3), dp(8), dp(3));
+        rigPill.setBackground(shape(0xff5b3ee8, 8));
+        rigPill.setOnClickListener(v -> {
+            if (scene.avatar == null) scene.avatar = AvatarProfile.defaultAvatar();
+            scene.avatar.isR15 = !scene.avatar.isR15;
+            rigPill.setText(scene.avatar.isR15 ? "R15" : "R6");
+            scene.logOutput("info", "Avatar rig converted to " + (scene.avatar.isR15 ? "R15" : "R6"));
+        });
+        hudRow.addView(rigPill, margin(dp(8), 0, -2, -2));
         camModePill = text("3P", 10.5f, true, 0xffffffff);
         camModePill.setPadding(dp(8), dp(3), dp(8), dp(3));
         camModePill.setBackground(shape(0xff2d56e8, 8));

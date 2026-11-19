@@ -1,5 +1,6 @@
 package dev.falix.studiomobile;
 
+import android.graphics.Bitmap;
 import org.json.*;
 import java.util.*;
 
@@ -11,14 +12,29 @@ final class AvatarProfile {
     float[] rightArmColor = {0.96f, 0.80f, 0.19f};
     float[] leftLegColor = {0.64f, 0.74f, 0.28f};
     float[] rightLegColor = {0.64f, 0.74f, 0.28f};
+    float[] shirtColor = null;
+    float[] pantsColor = null;
+    float[] hairColor = null;
+    boolean hasHair = false;
     float heightScale = 1.0f;
     float widthScale = 1.0f;
     float headScale = 1.0f;
     float depthScale = 1.0f;
     String username = "Player";
+    boolean loadedFromRoblox = false;
 
     static AvatarProfile defaultAvatar() {
         return new AvatarProfile();
+    }
+
+    float[] effectiveTorsoColor() { return shirtColor != null ? shirtColor : torsoColor; }
+    float[] effectiveLeftArmColor() { return shirtColor != null ? blend(shirtColor, leftArmColor, 0.35f) : leftArmColor; }
+    float[] effectiveRightArmColor() { return shirtColor != null ? blend(shirtColor, rightArmColor, 0.35f) : rightArmColor; }
+    float[] effectiveLeftLegColor() { return pantsColor != null ? pantsColor : leftLegColor; }
+    float[] effectiveRightLegColor() { return pantsColor != null ? pantsColor : rightLegColor; }
+
+    private static float[] blend(float[] a, float[] b, float t) {
+        return new float[]{a[0] * (1 - t) + b[0] * t, a[1] * (1 - t) + b[1] * t, a[2] * (1 - t) + b[2] * t};
     }
 
     static AvatarProfile fetchForUser(RobloxApi api, long userId, String username) {
@@ -53,8 +69,67 @@ final class AvatarProfile {
                 p.leftLegColor = hexRgb(bc3.optString("leftLegColor3", ""), p.leftLegColor);
                 p.rightLegColor = hexRgb(bc3.optString("rightLegColor3", ""), p.rightLegColor);
             }
+
+            // Inspect equipped clothing & hair assets so clothed avatars don't look like plain skin mannequins
+            long shirtId = 0, pantsId = 0, hairId = 0;
+            JSONArray assets = data.optJSONArray("assets");
+            if (assets != null) {
+                for (int i = 0; i < assets.length(); i++) {
+                    JSONObject a = assets.optJSONObject(i);
+                    if (a == null) continue;
+                    JSONObject at = a.optJSONObject("assetType");
+                    String typeName = at == null ? "" : at.optString("name", "");
+                    long id = a.optLong("id", 0);
+                    if (id <= 0) continue;
+                    if (("Shirt".equalsIgnoreCase(typeName) || "ShirtAccessory".equalsIgnoreCase(typeName) || "TShirt".equalsIgnoreCase(typeName)) && shirtId == 0) {
+                        shirtId = id;
+                    } else if (("Pants".equalsIgnoreCase(typeName) || "PantsAccessory".equalsIgnoreCase(typeName)) && pantsId == 0) {
+                        pantsId = id;
+                    } else if (("HairAccessory".equalsIgnoreCase(typeName) || "Hat".equalsIgnoreCase(typeName)) && hairId == 0) {
+                        hairId = id;
+                    }
+                }
+            }
+            if (shirtId > 0) p.shirtColor = sampleAssetColor(api, shirtId);
+            if (pantsId > 0) p.pantsColor = sampleAssetColor(api, pantsId);
+            if (hairId > 0) {
+                p.hairColor = sampleAssetColor(api, hairId);
+                p.hasHair = p.hairColor != null;
+            }
+            p.loadedFromRoblox = true;
         } catch (Throwable ignored) { }
         return p;
+    }
+
+    private static float[] sampleAssetColor(RobloxApi api, long assetId) {
+        try {
+            JSONArray data = api.json("https://thumbnails.roblox.com/v1/assets?assetIds=" + assetId + "&size=150x150&format=Png&isCircular=false", null, null).optJSONArray("data");
+            if (data == null || data.length() == 0) return null;
+            JSONObject item = data.getJSONObject(0);
+            String url = item.optString("imageUrl", "");
+            if (url.isEmpty() || !"Completed".equals(item.optString("state"))) return null;
+            Bitmap bmp = api.image(url, 64);
+            if (bmp == null) return null;
+            long rSum = 0, gSum = 0, bSum = 0, count = 0;
+            int w = bmp.getWidth(), h = bmp.getHeight();
+            int stepX = Math.max(1, w / 16), stepY = Math.max(1, h / 16);
+            for (int y = h / 6; y < h * 5 / 6; y += stepY) {
+                for (int x = w / 6; x < w * 5 / 6; x += stepX) {
+                    int px = bmp.getPixel(x, y);
+                    int alpha = (px >>> 24) & 0xFF;
+                    if (alpha < 180) continue;
+                    rSum += (px >> 16) & 0xFF;
+                    gSum += (px >> 8) & 0xFF;
+                    bSum += px & 0xFF;
+                    count++;
+                }
+            }
+            bmp.recycle();
+            if (count == 0) return null;
+            return new float[]{(rSum / (float) count) / 255f, (gSum / (float) count) / 255f, (bSum / (float) count) / 255f};
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static float clampScale(float v, float lo, float hi) {
