@@ -102,16 +102,20 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec2 atlasUv = tile.xy * uAtlasStep + (cell * (1.0 - 2.0 * EDGE) + EDGE) * uAtlasStep;\n" +
             "  vec3 base = uColor;\n" +
             "  if (uIsBaseplate > 0.5 && n.y > 0.5) {\n" +
-            "    float distFade = 1.0 - smoothstep(45.0, 280.0, length(uEye - vWorld));\n" +
-            "    vec2 g1 = abs(fract(vWorld.xz - 0.5) - 0.5);\n" +
-            "    float line1 = 1.0 - smoothstep(0.014, 0.036, min(g1.x, g1.y));\n" +
-            "    vec2 g4 = abs(fract(vWorld.xz * 0.25 - 0.5) - 0.5);\n" +
-            "    float line4 = 1.0 - smoothstep(0.008, 0.020, min(g4.x, g4.y));\n" +
-            "    float crossDot = (1.0 - smoothstep(0.035, 0.065, g4.x)) * (1.0 - smoothstep(0.035, 0.065, g4.y));\n" +
+            "    float camD = length(uEye - vWorld);\n" +
+            "    float distFade = 1.0 - smoothstep(40.0, 260.0, camD);\n" +
+            "    vec2 f1 = fract(vWorld.xz);\n" +
+            "    vec2 g1 = abs(f1 - 0.5);\n" +
+            "    float line1 = smoothstep(0.455, 0.495, max(g1.x, g1.y));\n" +
+            "    vec2 g4 = abs(fract(vWorld.xz * 0.25) - 0.5);\n" +
+            "    float line4 = smoothstep(0.478, 0.496, max(g4.x, g4.y));\n" +
+            "    vec2 studC = f1 - 0.5;\n" +
+            "    float sr = length(studC);\n" +
+            "    float bevelSun = dot(normalize(vec3(studC.x, 0.25, studC.y)), uSunDir) * smoothstep(0.34, 0.25, sr) * smoothstep(0.14, 0.24, sr);\n" +
             "    vec2 checker = floor(vWorld.xz * 0.25);\n" +
-            "    float tileShade = mod(checker.x + checker.y, 2.0) * 0.035;\n" +
-            "    vec3 studioSlate = vec3(0.39, 0.41, 0.44);\n" +
-            "    base = studioSlate * (1.0 - (line1 * 0.09 + line4 * 0.26 + tileShade) * distFade + crossDot * 0.08 * distFade);\n" +
+            "    float tileShade = mod(checker.x + checker.y, 2.0) * 0.032;\n" +
+            "    vec3 studioSlate = vec3(0.43, 0.45, 0.48);\n" +
+            "    base = studioSlate * (1.0 - (line1 * 0.08 + line4 * 0.24 + tileShade) * distFade + bevelSun * 0.14 * distFade);\n" +
             "  } else if (tile.w > 0.5) {\n" +
             "    base *= texture2D(uAtlas, atlasUv).rgb;\n" +
             "  }\n" +
@@ -152,7 +156,9 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);\n" +
             "  float viewDist = length(uEye - vWorld);\n" +
             "  float fog = uFogEnabled * clamp((viewDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.001), 0.0, 1.0);\n" +
-            "  gl_FragColor = vec4(mix(col, uFogColor, fog), uAlpha);\n" +
+            "  float atmoHorizon = smoothstep(140.0, 480.0, viewDist) * 0.65;\n" +
+            "  vec3 finalCol = mix(col, mix(uFogColor, vec3(0.73, 0.84, 0.96), 0.55), max(fog, atmoHorizon));\n" +
+            "  gl_FragColor = vec4(finalCol, uAlpha);\n" +
             "}";
 
     private static final String AVATAR_VERT =
@@ -267,6 +273,10 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private AvatarMesh uploadedAvatarMesh;
     private FloatBuffer avatarPosBuf, avatarNormBuf, avatarUvBuf;
     private int avatarGlTex, avatarVertCount;
+    private FloatBuffer cubeUvBuf, headPosBuf, headNormBuf, headUvBuf;
+    private ShortBuffer headIndices;
+    private int headIndexCount;
+    private int headFaceTex, torsoTex, armTex, legTex, uploadedTexVersion = -1;
     private int shadowFbo, shadowTex, shadowDepthRb;
     private boolean shadowReady;
     private final float[] mLightView = new float[16], mLightProj = new float[16], mLightVp = new float[16], mLightMvp = new float[16];
@@ -509,10 +519,71 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             }
         }
         short[] idx = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 13, 14, 12, 14, 15, 16, 17, 18, 16, 18, 19, 20, 21, 22, 20, 22, 23};
+        float[] uvs = new float[24 * 2];
+        for (int face = 0; face < 6; face++) {
+            int base = face * 8;
+            uvs[base] = 0f; uvs[base + 1] = 0f;
+            uvs[base + 2] = 1f; uvs[base + 3] = 0f;
+            uvs[base + 4] = 1f; uvs[base + 5] = 1f;
+            uvs[base + 6] = 0f; uvs[base + 7] = 1f;
+        }
         cubePositions = floatBuffer(p);
         cubeNormals = floatBuffer(n);
+        cubeUvBuf = floatBuffer(uvs);
         faceBuffer = floatBuffer(f);
         cubeIndices = shortBuffer(idx);
+        buildRobloxHead();
+    }
+
+    private void buildRobloxHead() {
+        int segs = 20;
+        float[] ringY = {-0.50f, -0.42f, -0.28f, 0.28f, 0.42f, 0.50f};
+        float[] ringR = {0.0f, 0.40f, 0.50f, 0.50f, 0.40f, 0.0f};
+        int rings = ringY.length;
+        int vertCount = rings * (segs + 1);
+        float[] pos = new float[vertCount * 3];
+        float[] norm = new float[vertCount * 3];
+        float[] uv = new float[vertCount * 2];
+        int vi = 0;
+        for (int r = 0; r < rings; r++) {
+            float y = ringY[r], rad = ringR[r];
+            float ny = r == 0 ? -1f : (r == rings - 1 ? 1f : (r == 1 ? -0.55f : (r == 4 ? 0.55f : 0f)));
+            for (int s = 0; s <= segs; s++) {
+                double a = (double) s / segs * Math.PI * 2.0 - Math.PI;
+                float sx = (float) Math.sin(a), sz = (float) Math.cos(a);
+                pos[vi * 3] = sx * rad;
+                pos[vi * 3 + 1] = y;
+                pos[vi * 3 + 2] = sz * rad;
+                float nLen = (float) Math.sqrt(sx * sx + ny * ny + sz * sz);
+                if (nLen < 1e-5f) nLen = 1f;
+                norm[vi * 3] = rad < 0.01f ? 0f : sx / nLen;
+                norm[vi * 3 + 1] = rad < 0.01f ? ny : ny / nLen;
+                norm[vi * 3 + 2] = rad < 0.01f ? 0f : sz / nLen;
+                // Map front face (+Z) cleanly to [0..1] UV
+                float u = 0.5f + sx * 0.52f;
+                float v = 0.5f - y;
+                if (sz < 0.15f) { u = 0.02f; v = 0.02f; }
+                uv[vi * 2] = Math.max(0.01f, Math.min(0.99f, u));
+                uv[vi * 2 + 1] = Math.max(0.01f, Math.min(0.99f, v));
+                vi++;
+            }
+        }
+        ArrayList<Short> idx = new ArrayList<>();
+        for (int r = 0; r < rings - 1; r++) {
+            for (int s = 0; s < segs; s++) {
+                short a = (short) (r * (segs + 1) + s);
+                short b = (short) (a + 1);
+                short c = (short) ((r + 1) * (segs + 1) + s);
+                short d = (short) (c + 1);
+                idx.add(a); idx.add(b); idx.add(d);
+                idx.add(a); idx.add(d); idx.add(c);
+            }
+        }
+        headPosBuf = floatBuffer(pos);
+        headNormBuf = floatBuffer(norm);
+        headUvBuf = floatBuffer(uv);
+        headIndices = shortBuffer(toShortArr(idx));
+        headIndexCount = idx.size();
     }
 
     private static float[] cross(float[] a, float[] b) {
@@ -1214,9 +1285,34 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glLineWidth(1f);
     }
 
+    private int uploadBitmapTex(int existingId, android.graphics.Bitmap bmp) {
+        if (bmp == null || bmp.isRecycled()) return existingId;
+        int id = existingId;
+        if (id == 0) {
+            int[] ids = new int[1];
+            GLES20.glGenTextures(1, ids, 0);
+            id = ids[0];
+        }
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id);
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        return id;
+    }
+
     private void ensureAvatarMeshUploaded() {
         AvatarProfile av = scene.avatar;
-        if (av == null || av.mesh3d == null || av.mesh3d == uploadedAvatarMesh) return;
+        if (av == null) return;
+        if (av.textureVersion != uploadedTexVersion) {
+            uploadedTexVersion = av.textureVersion;
+            if (av.headFaceBitmap != null) headFaceTex = uploadBitmapTex(headFaceTex, av.headFaceBitmap);
+            if (av.torsoBitmap != null) torsoTex = uploadBitmapTex(torsoTex, av.torsoBitmap);
+            if (av.armBitmap != null) armTex = uploadBitmapTex(armTex, av.armBitmap);
+            if (av.legBitmap != null) legTex = uploadBitmapTex(legTex, av.legBitmap);
+        }
+        if (av.mesh3d == null || av.mesh3d == uploadedAvatarMesh) return;
         uploadedAvatarMesh = av.mesh3d;
         avatarPosBuf = floatBuffer(uploadedAvatarMesh.positions);
         avatarNormBuf = floatBuffer(uploadedAvatarMesh.normals);
@@ -1306,28 +1402,25 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
 
 
-        // Classic Roblox beveled head (blocky cylinder feel, not a plain ball) + optional hair cap
+        // True beveled Roblox Head cylinder with composited Face texture + optional hair
         float headY = 4.62f * hs + bob;
-        charPart(p, cy, sy, 0, headY, 0, 0, 0, 1.16f * hds, 1.18f * hds, 1.16f * hds, av.headColor, skin, light, 1);
+        drawTexturedLimb(p, cy, sy, 0, headY, 0, 0, 0, 1.20f * hds, 1.22f * hds, 1.20f * hds, headFaceTex, light, true);
         if (av.hasHair && av.hairColor != null) {
-            charPart(p, cy, sy, 0, headY + 0.44f * hds, -0.05f * hds, 0, 0, 1.24f * hds, 0.42f * hds, 1.24f * hds, av.hairColor, skin, light, 1);
-            charPart(p, cy, sy, 0, headY + 0.06f * hds, -0.56f * hds, 0, 0, 1.22f * hds, 0.92f * hds, 0.18f * hds, av.hairColor, skin, light, 1);
+            charPart(p, cy, sy, 0, headY + 0.46f * hds, -0.05f * hds, 0, 0, 1.28f * hds, 0.42f * hds, 1.28f * hds, av.hairColor, skin, light, 1);
+            charPart(p, cy, sy, 0, headY + 0.05f * hds, -0.56f * hds, 0, 0, 1.24f * hds, 0.92f * hds, 0.20f * hds, av.hairColor, skin, light, 1);
         }
-        charPart(p, cy, sy, -0.22f * hds, headY + 0.10f * hds, 0.56f * hds, 0, 0, 0.12f * hds, 0.17f * hds, 0.08f * hds, eyeCol, skin, light, 1);
-        charPart(p, cy, sy, 0.22f * hds, headY + 0.10f * hds, 0.56f * hds, 0, 0, 0.12f * hds, 0.17f * hds, 0.08f * hds, eyeCol, skin, light, 1);
-        charPart(p, cy, sy, 0f, headY - 0.17f * hds, 0.56f * hds, 0, 0, 0.34f * hds, 0.07f * hds, 0.08f * hds, eyeCol, skin, light, 1);
 
         if (!av.isR15) {
-            // Classic Roblox R6 Rig (6 rigid blocks with exact 2x2x1 torso and 1x2x1 limbs)
+            // Classic Roblox R6 Rig with real UV-mapped Shirt/Pants textures
             float armPitchL = scene.onGround ? -swing : -2.6f;
             float armPitchR = scene.onGround ? swing : -2.6f;
             float legPitchL = scene.onGround ? swing : 0.30f;
             float legPitchR = scene.onGround ? -swing : -0.30f;
-            charPart(p, cy, sy, 0, 3.0f + bob, 0, 0, 0, 2.0f, 2.0f, 1.0f, torsoCol, skin, light, 1);
-            charPart(p, cy, sy, -1.5f, 4.0f + bob, 0, -1.0f, armPitchL, 1.0f, 2.0f, 1.0f, lArmCol, skin, light, 1);
-            charPart(p, cy, sy, 1.5f, 4.0f + bob, 0, -1.0f, armPitchR, 1.0f, 2.0f, 1.0f, rArmCol, skin, light, 1);
-            charPart(p, cy, sy, -0.5f, 2.0f + bob, 0, -1.0f, legPitchL, 1.0f, 2.0f, 1.0f, lLegCol, skin, light, 1);
-            charPart(p, cy, sy, 0.5f, 2.0f + bob, 0, -1.0f, legPitchR, 1.0f, 2.0f, 1.0f, rLegCol, skin, light, 1);
+            drawTexturedLimb(p, cy, sy, 0, 3.0f + bob, 0, 0, 0, 2.0f, 2.0f, 1.0f, torsoTex, light, false);
+            drawTexturedLimb(p, cy, sy, -1.5f, 4.0f + bob, 0, -1.0f, armPitchL, 1.0f, 2.0f, 1.0f, armTex, light, false);
+            drawTexturedLimb(p, cy, sy, 1.5f, 4.0f + bob, 0, -1.0f, armPitchR, 1.0f, 2.0f, 1.0f, armTex, light, false);
+            drawTexturedLimb(p, cy, sy, -0.5f, 2.0f + bob, 0, -1.0f, legPitchL, 1.0f, 2.0f, 1.0f, legTex, light, false);
+            drawTexturedLimb(p, cy, sy, 0.5f, 2.0f + bob, 0, -1.0f, legPitchR, 1.0f, 2.0f, 1.0f, legTex, light, false);
             return;
         }
 
@@ -1342,20 +1435,20 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float kneeBendL = scene.onGround ? Math.max(0f, -legPitchL) * 0.75f + landSquash * 1.4f : 0.55f;
         float kneeBendR = scene.onGround ? Math.max(0f, -legPitchR) * 0.75f + landSquash * 1.4f : 0.45f;
 
-        charPart(p, cy, sy, 0, 2.25f * hs + bob, 0, 0, torsoLean * 0.5f, 1.95f * ws, 0.65f * hs, 0.98f * ds, torsoCol, skin, light, 1);
-        charPart(p, cy, sy, 0, 3.25f * hs + bob, 0, 0, torsoLean, 2.02f * ws, 1.38f * hs, 1.04f * ds, torsoCol, skin, light, 1);
+        drawTexturedLimb(p, cy, sy, 0, 2.25f * hs + bob, 0, 0, torsoLean * 0.5f, 1.95f * ws, 0.65f * hs, 0.98f * ds, torsoTex, light, false);
+        drawTexturedLimb(p, cy, sy, 0, 3.25f * hs + bob, 0, 0, torsoLean, 2.02f * ws, 1.38f * hs, 1.04f * ds, torsoTex, light, false);
 
         float shoulderY = 3.88f * hs + bob;
         float armX = 1.48f * ws;
         float uArmH = 0.96f * hs, lArmH = 0.96f * hs;
-        drawLimbChain(p, cy, sy, -armX, shoulderY, 0, armPitchL, armPitchL - elbowBendL, uArmH, lArmH, 0.92f * ws, 0.92f * ds, lArmCol, skin, light);
-        drawLimbChain(p, cy, sy, armX, shoulderY, 0, armPitchR, armPitchR - elbowBendR, uArmH, lArmH, 0.92f * ws, 0.92f * ds, rArmCol, skin, light);
+        drawTexturedChain(p, cy, sy, -armX, shoulderY, 0, armPitchL, armPitchL - elbowBendL, uArmH, lArmH, 0.92f * ws, 0.92f * ds, armTex, light);
+        drawTexturedChain(p, cy, sy, armX, shoulderY, 0, armPitchR, armPitchR - elbowBendR, uArmH, lArmH, 0.92f * ws, 0.92f * ds, armTex, light);
 
         float hipY = 1.94f * hs + bob;
         float legX = 0.52f * ws;
         float uLegH = 0.98f * hs, lLegH = 0.98f * hs;
-        drawLimbChain(p, cy, sy, -legX, hipY, 0, legPitchL, legPitchL + kneeBendL, uLegH, lLegH, 0.94f * ws, 0.94f * ds, lLegCol, skin, light);
-        drawLimbChain(p, cy, sy, legX, hipY, 0, legPitchR, legPitchR + kneeBendR, uLegH, lLegH, 0.94f * ws, 0.94f * ds, rLegCol, skin, light);
+        drawTexturedChain(p, cy, sy, -legX, hipY, 0, legPitchL, legPitchL + kneeBendL, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
+        drawTexturedChain(p, cy, sy, legX, hipY, 0, legPitchR, legPitchR + kneeBendR, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
     }
 
     private void drawLimbChain(double[] origin, float cy, float sy, float ox, float pivotY, float oz,
@@ -1365,6 +1458,51 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float jointY = pivotY - upperLen * (float) Math.cos(upperPitch);
         float jointZ = oz - upperLen * (float) Math.sin(upperPitch);
         charPart(origin, cy, sy, ox, jointY, jointZ, -lowerLen * 0.5f, lowerPitch, w * 0.95f, lowerLen, d * 0.95f, color, skin, light, 1);
+    }
+
+    private void drawTexturedChain(double[] origin, float cy, float sy, float ox, float pivotY, float oz,
+                                   float upperPitch, float lowerPitch, float upperLen, float lowerLen,
+                                   float w, float d, int texId, EngineLighting light) {
+        drawTexturedLimb(origin, cy, sy, ox, pivotY, oz, -upperLen * 0.5f, upperPitch, w, upperLen, d, texId, light, false);
+        float jointY = pivotY - upperLen * (float) Math.cos(upperPitch);
+        float jointZ = oz - upperLen * (float) Math.sin(upperPitch);
+        drawTexturedLimb(origin, cy, sy, ox, jointY, jointZ, -lowerLen * 0.5f, lowerPitch, w * 0.95f, lowerLen, d * 0.95f, texId, light, false);
+    }
+
+    private void drawTexturedLimb(double[] origin, float cy, float sy, float ox, float pivotYAboveFeet, float oz,
+                                  float localOffsetY, float pitchX, float w, float h, float d,
+                                  int texId, EngineLighting light, boolean isHead) {
+        float cp = (float) Math.cos(pitchX), sp = (float) Math.sin(pitchX);
+        float ly = localOffsetY * cp, lz = localOffsetY * sp;
+        float rx = ox, rz = oz + lz;
+        double wx = origin[0] + (rx * cy + rz * sy);
+        double wz = origin[2] + (-rx * sy + rz * cy);
+        double wy = origin[1] - scene.charHy + pivotYAboveFeet + ly;
+        double[] c = { wx, wy, wz, cy, sy * sp, sy * cp, 0, cp, -sp, -sy, cy * sp, cy * cp };
+        setModel(c, w, h, d);
+        GLES20.glUseProgram(avatarProgram);
+        GLES20.glUniformMatrix4fv(avMvp, 1, false, mMvp, 0);
+        GLES20.glUniformMatrix3fv(avNormal, 1, false, normal3, 0);
+        GLES20.glUniform3f(avSunDir, (float) light.sunDirection[0], (float) light.sunDirection[1], (float) light.sunDirection[2]);
+        GLES20.glUniform3f(avSunColor, (float) light.sunColor[0], (float) light.sunColor[1], (float) light.sunColor[2]);
+        GLES20.glUniform1f(avSunGain, (float) light.sunGain);
+        GLES20.glUniform3f(avAmbient, (float) light.ambientDiffuse[0], (float) light.ambientDiffuse[1], (float) light.ambientDiffuse[2]);
+        GLES20.glUniform1i(avTex, 0);
+        if (texId != 0) { bindTexture(0, texId); GLES20.glUniform1f(avHasTex, 1f); }
+        else GLES20.glUniform1f(avHasTex, 0f);
+        FloatBuffer pb = isHead && headPosBuf != null ? headPosBuf : cubePositions;
+        FloatBuffer nb = isHead && headNormBuf != null ? headNormBuf : cubeNormals;
+        FloatBuffer ub = isHead && headUvBuf != null ? headUvBuf : cubeUvBuf;
+        ShortBuffer ib = isHead && headIndices != null ? headIndices : cubeIndices;
+        int ic = isHead && headIndices != null ? headIndexCount : 36;
+        GLES20.glEnableVertexAttribArray(avPos);
+        GLES20.glVertexAttribPointer(avPos, 3, GLES20.GL_FLOAT, false, 0, pb);
+        if (avNorm >= 0) { GLES20.glEnableVertexAttribArray(avNorm); GLES20.glVertexAttribPointer(avNorm, 3, GLES20.GL_FLOAT, false, 0, nb); }
+        if (avUv >= 0) { GLES20.glEnableVertexAttribArray(avUv); GLES20.glVertexAttribPointer(avUv, 2, GLES20.GL_FLOAT, false, 0, ub); }
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, ic, GLES20.GL_UNSIGNED_SHORT, ib);
+        GLES20.glDisableVertexAttribArray(avPos);
+        if (avNorm >= 0) GLES20.glDisableVertexAttribArray(avNorm);
+        if (avUv >= 0) GLES20.glDisableVertexAttribArray(avUv);
     }
 
     private void charPart(double[] origin, float cy, float sy, float ox, float pivotYAboveFeet, float oz,

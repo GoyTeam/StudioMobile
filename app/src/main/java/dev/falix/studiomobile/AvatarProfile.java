@@ -1,6 +1,6 @@
 package dev.falix.studiomobile;
 
-import android.graphics.Bitmap;
+import android.graphics.*;
 import org.json.*;
 import java.util.*;
 
@@ -25,9 +25,18 @@ final class AvatarProfile {
     int assetCount = 0;
     boolean loadedFromRoblox = false;
     AvatarMesh mesh3d = null;
+    String statusNote = "default";
+
+    Bitmap headFaceBitmap;
+    Bitmap torsoBitmap;
+    Bitmap armBitmap;
+    Bitmap legBitmap;
+    volatile int textureVersion = 1;
 
     static AvatarProfile defaultAvatar() {
-        return new AvatarProfile();
+        AvatarProfile p = new AvatarProfile();
+        p.buildFallbackTextures();
+        return p;
     }
 
     float[] effectiveTorsoColor() { return shirtColor != null ? shirtColor : torsoColor; }
@@ -36,10 +45,24 @@ final class AvatarProfile {
     float[] effectiveLeftLegColor() { return pantsColor != null ? pantsColor : leftLegColor; }
     float[] effectiveRightLegColor() { return pantsColor != null ? pantsColor : rightLegColor; }
 
+    String statusSummary() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Avatar @").append(username)
+          .append(" (").append(isR15 ? "R15" : "R6")
+          .append(", ").append(assetCount).append(" items");
+        if (mesh3d != null) sb.append(", 3D mesh ").append(mesh3d.vertexCount).append(" verts");
+        else sb.append(", UV textures ready");
+        sb.append(")");
+        return sb.toString();
+    }
+
     static AvatarProfile fetchForUser(RobloxApi api, long userId, String username) {
         AvatarProfile p = new AvatarProfile();
         if (username != null && !username.isEmpty()) p.username = username;
-        if (userId <= 0 || api == null) return p;
+        if (userId <= 0 || api == null) {
+            p.buildFallbackTextures();
+            return p;
+        }
         try {
             JSONObject data = null;
             try {
@@ -75,7 +98,7 @@ final class AvatarProfile {
                 p.rightLegColor = hexRgb(bc3.optString("rightLegColor3", ""), p.rightLegColor);
             }
 
-            long shirtId = 0, pantsId = 0, hairId = 0;
+            long shirtId = 0, pantsId = 0, faceId = 0, hairId = 0;
             JSONArray assets = data.optJSONArray("assets");
             if (assets != null) {
                 p.assetCount = assets.length();
@@ -90,66 +113,125 @@ final class AvatarProfile {
                         shirtId = id;
                     } else if (("Pants".equalsIgnoreCase(typeName) || "PantsAccessory".equalsIgnoreCase(typeName) || "ShortsAccessory".equalsIgnoreCase(typeName)) && pantsId == 0) {
                         pantsId = id;
+                    } else if ("Face".equalsIgnoreCase(typeName) && faceId == 0) {
+                        faceId = id;
                     } else if (("HairAccessory".equalsIgnoreCase(typeName) || "Hat".equalsIgnoreCase(typeName)) && hairId == 0) {
                         hairId = id;
                     }
                 }
             }
-            if (shirtId > 0) p.shirtColor = sampleAssetColor(api, shirtId, false);
-            if (pantsId > 0) p.pantsColor = sampleAssetColor(api, pantsId, false);
+
+            Bitmap faceBmp = faceId > 0 ? fetchAssetThumbnail(api, faceId, 256) : null;
+            Bitmap fullBody = fetchUserThumbnail(api, "https://thumbnails.roblox.com/v1/users/avatar?userIds=" + userId + "&size=352x352&format=Png&isCircular=false", 352);
             if (hairId > 0) {
-                p.hairColor = sampleAssetColor(api, hairId, true);
-                p.hasHair = p.hairColor != null;
+                Bitmap hb = fetchAssetThumbnail(api, hairId, 150);
+                if (hb != null) {
+                    p.hairColor = sampleRegion(hb, hb.getWidth() / 5, hb.getWidth() * 4 / 5, hb.getHeight() / 5, hb.getHeight() * 4 / 5, false);
+                    p.hasHair = p.hairColor != null;
+                    hb.recycle();
+                }
             }
-            // Fallback: sample full-body avatar thumbnail bands (hair, torso, legs) if individual clothing assets didn't return thumbnails
-            if (p.shirtColor == null || p.pantsColor == null || !p.hasHair) {
-                sampleFullBodyThumbnail(api, userId, p);
+            if (fullBody != null) {
+                int w = fullBody.getWidth(), h = fullBody.getHeight();
+                if (!p.hasHair) {
+                    float[] topBand = sampleRegion(fullBody, w * 36 / 100, w * 64 / 100, h * 7 / 100, h * 18 / 100, false);
+                    if (topBand != null && colorDiff(topBand, p.headColor) > 0.14f) {
+                        p.hairColor = topBand;
+                        p.hasHair = true;
+                    }
+                }
+                p.shirtColor = sampleRegion(fullBody, w * 36 / 100, w * 64 / 100, h * 36 / 100, h * 54 / 100, false);
+                p.sleeveColor = sampleRegion(fullBody, w * 22 / 100, w * 34 / 100, h * 38 / 100, h * 54 / 100, false);
+                p.pantsColor = sampleRegion(fullBody, w * 36 / 100, w * 64 / 100, h * 62 / 100, h * 86 / 100, false);
+                p.torsoBitmap = compositeCrop(p.effectiveTorsoColor(), fullBody, w * 35 / 100, h * 34 / 100, w * 30 / 100, h * 26 / 100);
+                p.armBitmap = compositeCrop(p.effectiveLeftArmColor(), fullBody, w * 23 / 100, h * 35 / 100, w * 12 / 100, h * 26 / 100);
+                p.legBitmap = compositeCrop(p.effectiveLeftLegColor(), fullBody, w * 37 / 100, h * 62 / 100, w * 26 / 100, h * 30 / 100);
+                fullBody.recycle();
             }
+            p.headFaceBitmap = compositeFace(p.headColor, faceBmp);
+            if (faceBmp != null) faceBmp.recycle();
+            if (p.torsoBitmap == null) p.torsoBitmap = solidSwatch(p.effectiveTorsoColor());
+            if (p.armBitmap == null) p.armBitmap = solidSwatch(p.effectiveLeftArmColor());
+            if (p.legBitmap == null) p.legBitmap = solidSwatch(p.effectiveLeftLegColor());
+
             p.mesh3d = AvatarMesh.fetch(api, userId);
             p.loadedFromRoblox = true;
-        } catch (Throwable ignored) { }
+            p.textureVersion++;
+        } catch (Throwable ignored) {
+            p.buildFallbackTextures();
+        }
         return p;
     }
 
-    private static void sampleFullBodyThumbnail(RobloxApi api, long userId, AvatarProfile p) {
-        try {
-            JSONArray data = api.json("https://thumbnails.roblox.com/v1/users/avatar?userIds=" + userId + "&size=150x150&format=Png&isCircular=false", null, null).optJSONArray("data");
-            if (data == null || data.length() == 0) return;
-            JSONObject item = data.getJSONObject(0);
-            String url = item.optString("imageUrl", "");
-            if (url.isEmpty() || !"Completed".equals(item.optString("state"))) return;
-            Bitmap bmp = api.image(url, 150);
-            if (bmp == null) return;
-            int w = bmp.getWidth(), h = bmp.getHeight();
-            if (!p.hasHair) {
-                float[] topBand = sampleRegion(bmp, w * 35 / 100, w * 65 / 100, h * 8 / 100, h * 20 / 100, false);
-                if (topBand != null) { p.hairColor = topBand; p.hasHair = true; }
-            }
-            if (p.shirtColor == null) {
-                p.shirtColor = sampleRegion(bmp, w * 36 / 100, w * 64 / 100, h * 36 / 100, h * 54 / 100, false);
-            }
-            if (p.sleeveColor == null) {
-                p.sleeveColor = sampleRegion(bmp, w * 22 / 100, w * 35 / 100, h * 38 / 100, h * 54 / 100, false);
-            }
-            if (p.pantsColor == null) {
-                p.pantsColor = sampleRegion(bmp, w * 36 / 100, w * 64 / 100, h * 62 / 100, h * 86 / 100, false);
-            }
-            bmp.recycle();
-        } catch (Throwable ignored) { }
+    void buildFallbackTextures() {
+        if (headFaceBitmap == null) headFaceBitmap = compositeFace(headColor, null);
+        if (torsoBitmap == null) torsoBitmap = solidSwatch(effectiveTorsoColor());
+        if (armBitmap == null) armBitmap = solidSwatch(effectiveLeftArmColor());
+        if (legBitmap == null) legBitmap = solidSwatch(effectiveLeftLegColor());
     }
 
-    private static float[] sampleAssetColor(RobloxApi api, long assetId, boolean includeBright) {
+    private static Bitmap compositeFace(float[] skin, Bitmap faceDecal) {
+        Bitmap out = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(out);
+        c.drawColor(toArgb(skin));
+        if (faceDecal != null) {
+            Rect src = new Rect(0, 0, faceDecal.getWidth(), faceDecal.getHeight());
+            Rect dst = new Rect(28, 34, 228, 224);
+            c.drawBitmap(faceDecal, src, dst, new Paint(Paint.FILTER_BITMAP_FLAG));
+        } else {
+            Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+            p.setColor(0xFF1A1C22);
+            c.drawOval(new RectF(82, 86, 102, 118), p);
+            c.drawOval(new RectF(154, 86, 174, 118), p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(10f);
+            p.setStrokeCap(Paint.Cap.ROUND);
+            c.drawArc(new RectF(84, 112, 172, 178), 22, 136, false, p);
+        }
+        return out;
+    }
+
+    private static Bitmap compositeCrop(float[] bg, Bitmap srcBmp, int x, int y, int w, int h) {
+        Bitmap out = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(out);
+        c.drawColor(toArgb(bg));
+        int sx = Math.max(0, Math.min(srcBmp.getWidth() - 2, x));
+        int sy = Math.max(0, Math.min(srcBmp.getHeight() - 2, y));
+        int sw = Math.max(2, Math.min(srcBmp.getWidth() - sx, w));
+        int sh = Math.max(2, Math.min(srcBmp.getHeight() - sy, h));
+        c.drawBitmap(srcBmp, new Rect(sx, sy, sx + sw, sy + sh), new Rect(0, 0, 128, 128), new Paint(Paint.FILTER_BITMAP_FLAG));
+        return out;
+    }
+
+    private static Bitmap solidSwatch(float[] rgb) {
+        Bitmap out = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888);
+        out.eraseColor(toArgb(rgb));
+        return out;
+    }
+
+    private static int toArgb(float[] rgb) {
+        int r = Math.max(0, Math.min(255, Math.round(rgb[0] * 255f)));
+        int g = Math.max(0, Math.min(255, Math.round(rgb[1] * 255f)));
+        int b = Math.max(0, Math.min(255, Math.round(rgb[2] * 255f)));
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    private static float colorDiff(float[] a, float[] b) {
+        return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+    }
+
+    private static Bitmap fetchAssetThumbnail(RobloxApi api, long assetId, int size) {
+        return fetchUserThumbnail(api, "https://thumbnails.roblox.com/v1/assets?assetIds=" + assetId + "&size=150x150&format=Png&isCircular=false", size);
+    }
+
+    private static Bitmap fetchUserThumbnail(RobloxApi api, String endpoint, int size) {
         try {
-            JSONArray data = api.json("https://thumbnails.roblox.com/v1/assets?assetIds=" + assetId + "&size=150x150&format=Png&isCircular=false", null, null).optJSONArray("data");
+            JSONArray data = api.json(endpoint, null, null).optJSONArray("data");
             if (data == null || data.length() == 0) return null;
             JSONObject item = data.getJSONObject(0);
             String url = item.optString("imageUrl", "");
             if (url.isEmpty() || !"Completed".equals(item.optString("state"))) return null;
-            Bitmap bmp = api.image(url, 96);
-            if (bmp == null) return null;
-            float[] col = sampleRegion(bmp, bmp.getWidth() / 5, bmp.getWidth() * 4 / 5, bmp.getHeight() / 5, bmp.getHeight() * 4 / 5, !includeBright);
-            bmp.recycle();
-            return col;
+            return api.image(url, size);
         } catch (Throwable ignored) {
             return null;
         }

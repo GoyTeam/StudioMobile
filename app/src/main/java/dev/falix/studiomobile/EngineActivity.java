@@ -35,7 +35,7 @@ public final class EngineActivity extends Activity {
     private ScriptEditorView scriptEditor;
     private boolean narrowScreen;
     private int explorerWidth, propertiesWidth;
-    private TextView title, subtitle, playLabel, explorerCount, flySpeedPill, camModePill, healthLabel;
+    private TextView title, subtitle, playLabel, explorerCount, flySpeedPill, camModePill, healthLabel, rigPill;
     private EditText explorerSearch, commandInput;
     private FrameLayout viewportLayer;
     private TextView rendererError;
@@ -501,7 +501,7 @@ public final class EngineActivity extends Activity {
         hudRow.setBackground(shape(0xbb181c24, 12));
         healthLabel = text("HP 100/100", 11, true, 0xff7ce6a5);
         hudRow.addView(healthLabel);
-        final TextView rigPill = text("Avatar", 10.5f, true, 0xffffffff);
+        rigPill = text("R15", 10.5f, true, 0xffffffff);
         rigPill.setPadding(dp(8), dp(3), dp(8), dp(3));
         rigPill.setBackground(shape(0xff5b3ee8, 8));
         rigPill.setOnClickListener(v -> {
@@ -773,7 +773,11 @@ public final class EngineActivity extends Activity {
                 if (uid > 0) {
                     AvatarProfile av = AvatarProfile.fetchForUser(api, uid, uname);
                     scene.avatar = av;
-                    scene.logOutput("info", "Loaded avatar @" + av.username + " (" + (av.isR15 ? "R15" : "R6") + ", " + av.assetCount + " items" + (av.mesh3d != null ? ", 3D mesh " + av.mesh3d.vertexCount + " verts" : "") + ")");
+                    scene.use3dAvatar = av.mesh3d != null;
+                    scene.logOutput("info", av.statusSummary());
+                    runOnUiThread(() -> {
+                        if (rigPill != null) rigPill.setText(scene.use3dAvatar ? "3D" : (av.isR15 ? "R15" : "R6"));
+                    });
                 }
             } catch (Throwable ignored) { }
         });
