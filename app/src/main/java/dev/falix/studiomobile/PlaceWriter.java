@@ -3,7 +3,6 @@ package dev.falix.studiomobile;
 import java.io.*;
 import java.util.*;
 
-/** Serializes an engine tree to Roblox XML (rbxlx, version 4). Unknown classes round-trip by name. */
 final class PlaceWriter {
     static String esc(String s) {
         StringBuilder b = new StringBuilder(s.length() + 16);
@@ -17,6 +16,7 @@ final class PlaceWriter {
         }
         return b.toString();
     }
+
     static String ref() { return "RBX" + UUID.randomUUID().toString().replace("-", "").toUpperCase(Locale.US); }
 
     static String generate(Instance root) { StringBuilder out = new StringBuilder(4096); writeRoot(out, root); return out.toString(); }
@@ -46,15 +46,26 @@ final class PlaceWriter {
         out.append("</Item>\n");
     }
 
-    /** Vec3 values may be stored as Instance.Vector3 or as double[3]; arrays keep the exact property type. */
+    private static boolean isScriptClass(String cls) {
+        return "Script".equals(cls) || "LocalScript".equals(cls) || "ModuleScript".equals(cls);
+    }
+
     private static void writeProperty(StringBuilder out, Instance owner, String key, Object v, int depth) {
         if (key.startsWith("__") || key.equals("Name")) return;
         if ("Color3uint8".equals(key) && v instanceof Number) {
             out.append("<Color3uint8 name=\"Color3uint8\">").append(Long.toString(0xFF000000L | (((Number) v).intValue() & 0xFFFFFFL), 10)).append("</Color3uint8>");
             return;
         }
+        if ("Source".equals(key) && v instanceof String && isScriptClass(owner.className)) {
+            out.append("<ProtectedString name=\"Source\">").append(esc((String) v)).append("</ProtectedString>");
+            return;
+        }
         if (owner.tags.containsKey(key)) {
             String hinted = owner.tags.get(key);
+            if ("ProtectedString".equals(hinted) && v instanceof String) {
+                out.append("<ProtectedString name=\"").append(esc(key)).append("\">").append(esc((String) v)).append("</ProtectedString>");
+                return;
+            }
             if ("token".equals(hinted) && v instanceof Number) {
                 out.append("<token name=\"").append(esc(key)).append("\">").append(((Number) v).longValue()).append("</token>");
                 return;
@@ -93,7 +104,6 @@ final class PlaceWriter {
             out.append("<Color3 name=\"").append(esc(key)).append("\"><R>").append(num(c[0] / 255.0)).append("</R><G>").append(num(c[1] / 255.0)).append("</G><B>").append(num(c[2] / 255.0)).append("</B></Color3>");
             return;
         }
-        // Anything not modeled is preserved when it knows its original XML tag.
         String original = v instanceof Raw ? ((Raw) v).xml : null;
         if (original != null) out.append(original);
     }
@@ -105,6 +115,5 @@ final class PlaceWriter {
         return s.endsWith(".") ? s + "0" : s;
     }
 
-    /** Verbatim XML fragment kept for property types this build does not model. */
     static final class Raw { final String xml; Raw(String xml) { this.xml = xml; } }
 }

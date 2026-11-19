@@ -40,16 +40,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
     // ---------------------------------------------------------------- shaders
     private static final String VERT =
-            "uniform mat4 uMvp; uniform mat4 uModel; uniform mat3 uNormal; attribute vec3 aPos; attribute vec3 aLocal; attribute float aFace;\n" +
+            "uniform mat4 uMvp; uniform mat4 uModel; uniform mat3 uNormal; uniform float uUseCustomNorm; attribute vec3 aPos; attribute vec3 aLocal; attribute float aFace;\n" +
             "varying vec3 vNormal; varying vec3 vWorld; varying vec3 vLocal; varying float vFace;\n" +
-            // The mesh is the unit cube, so the face normal is the dominant axis of the local position.
             "vec3 localNormal(vec3 p){\n" +
             "  vec3 a = abs(p);\n" +
             "  if (a.x >= a.y && a.x >= a.z) return vec3(p.x < 0.0 ? -1.0 : 1.0, 0.0, 0.0);\n" +
             "  if (a.y >= a.z) return vec3(0.0, p.y < 0.0 ? -1.0 : 1.0, 0.0);\n" +
             "  return vec3(0.0, 0.0, p.z < 0.0 ? -1.0 : 1.0);\n" +
             "}\n" +
-            "void main(){ vNormal=uNormal*localNormal(aLocal); vWorld=(uModel*vec4(aPos,1.0)).xyz; vLocal=aLocal; vFace=aFace;\n" +
+            "void main(){ vec3 ln = uUseCustomNorm > 0.5 ? normalize(aLocal) : localNormal(aLocal); vNormal=uNormal*ln; vWorld=(uModel*vec4(aPos,1.0)).xyz; vLocal=aPos; vFace=aFace;\n" +
             "  gl_Position=uMvp*vec4(aPos,1.0); }";
 
     private static final String FRAG =
@@ -205,7 +204,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
     // ---------------------------------------------------------------- programs
     private int program, lineProgram, skyProgram, brightProgram, blurProgram, raysProgram, postProgram;
-    private int aPos, aLocal, aFace, uMvp, uModel, uNormal, uColor, uAlpha;
+    private int aPos, aLocal, aFace, uMvp, uModel, uNormal, uUseCustomNorm, uColor, uAlpha;
     private int uAmbient, uSunDir, uSunColor, uSunGain, uShiftTop, uShiftBottom, uEye, uRough, uMetal, uEmissive, uShininess, uSpecular;
     private int uFogColor, uFogRange, uFogEnabled, uLightPos, uLightColor, uLightDir, uLightParams, uLightCount;
     private int uAtlas, uAtlasStep, uFaceTiles, uSpawnTile, uIsSpawn, uAsset, uHasAsset, uAssetTiles, uAssetFace;
@@ -216,8 +215,19 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private int bScene, bThreshold, ublSrc, ublStep, rScene, rSunUv, rSpread, rIntensity, pScene, pBloom, pRays, pBloomAmount, pRaysAmount, pExposure, pCcBrightness, pCcContrast, pCcSaturation, pTint;
 
     // ---------------------------------------------------------------- geometry
-    private FloatBuffer cubePositions, cubeNormals, faceBuffer, gridLines, quadBuffer, gizmoBuffer;
+    private FloatBuffer cubePositions, cubeNormals, faceBuffer, gridLines, quadBuffer, gizmoBuffer, outlineBuffer;
     private ShortBuffer cubeIndices;
+    private FloatBuffer spherePositions, sphereNormals, sphereFaces;
+    private ShortBuffer sphereIndices;
+    private int sphereIndexCount;
+    private FloatBuffer cylPositions, cylNormals, cylFaces;
+    private ShortBuffer cylIndices;
+    private int cylIndexCount;
+    private FloatBuffer wedgePositions, wedgeNormals, wedgeFaces;
+    private ShortBuffer wedgeIndices;
+    private int wedgeIndexCount;
+    private final float[] frustumPlanes = new float[24];
+    private final float[] outlineScratch = new float[72];
     private int gridVertices;
     /** 3 rotate rings x 48 segments x 2 vertices; the move axes only need 6. */
     private static final int GIZMO_LINE_VERTICES = 3 * 48 * 2;
@@ -270,6 +280,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             uMvp = GLES20.glGetUniformLocation(program, "uMvp");
             uModel = GLES20.glGetUniformLocation(program, "uModel");
             uNormal = GLES20.glGetUniformLocation(program, "uNormal");
+            uUseCustomNorm = GLES20.glGetUniformLocation(program, "uUseCustomNorm");
             uColor = GLES20.glGetUniformLocation(program, "uColor");
             uAlpha = GLES20.glGetUniformLocation(program, "uAlpha");
             uAmbient = GLES20.glGetUniformLocation(program, "uAmbient");
@@ -364,6 +375,9 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             pTint = GLES20.glGetUniformLocation(postProgram, "uTint");
 
             buildCube();
+            buildSphere();
+            buildCylinder();
+            buildWedge();
             buildGrid();
             buildQuad();
             textures.buildAtlas();
@@ -432,6 +446,145 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private void buildQuad() {
         quadBuffer = floatBuffer(new float[]{-1, -1, 1, -1, -1, 1, 1, 1});
         gizmoBuffer = ByteBuffer.allocateDirect(gizmoScratch.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        outlineBuffer = ByteBuffer.allocateDirect(outlineScratch.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+    }
+
+    private void buildSphere() {
+        int stacks = 10, slices = 16;
+        int vertCount = (stacks + 1) * (slices + 1);
+        float[] pos = new float[vertCount * 3];
+        float[] norm = new float[vertCount * 3];
+        float[] faces = new float[vertCount];
+        int vi = 0;
+        for (int i = 0; i <= stacks; i++) {
+            double phi = Math.PI * i / stacks;
+            float y = (float) Math.cos(phi);
+            float r = (float) Math.sin(phi);
+            for (int j = 0; j <= slices; j++) {
+                double theta = 2.0 * Math.PI * j / slices;
+                float x = (float) (r * Math.cos(theta));
+                float z = (float) (r * Math.sin(theta));
+                pos[vi * 3] = x * 0.5f;
+                pos[vi * 3 + 1] = y * 0.5f;
+                pos[vi * 3 + 2] = z * 0.5f;
+                norm[vi * 3] = x;
+                norm[vi * 3 + 1] = y;
+                norm[vi * 3 + 2] = z;
+                faces[vi] = 2f;
+                vi++;
+            }
+        }
+        short[] idx = new short[stacks * slices * 6];
+        int ii = 0;
+        for (int i = 0; i < stacks; i++) {
+            for (int j = 0; j < slices; j++) {
+                short a = (short) (i * (slices + 1) + j);
+                short b = (short) ((i + 1) * (slices + 1) + j);
+                short c = (short) ((i + 1) * (slices + 1) + j + 1);
+                short d = (short) (i * (slices + 1) + j + 1);
+                idx[ii++] = a; idx[ii++] = d; idx[ii++] = b;
+                idx[ii++] = b; idx[ii++] = d; idx[ii++] = c;
+            }
+        }
+        spherePositions = floatBuffer(pos);
+        sphereNormals = floatBuffer(norm);
+        sphereFaces = floatBuffer(faces);
+        sphereIndices = shortBuffer(idx);
+        sphereIndexCount = idx.length;
+    }
+
+    private void buildCylinder() {
+        int segs = 20;
+        ArrayList<Float> p = new ArrayList<>();
+        ArrayList<Float> n = new ArrayList<>();
+        ArrayList<Float> f = new ArrayList<>();
+        ArrayList<Short> idx = new ArrayList<>();
+        // Side wall along X axis (Roblox cylinder axis is X)
+        for (int i = 0; i <= segs; i++) {
+            double a = 2.0 * Math.PI * i / segs;
+            float ny = (float) Math.cos(a), nz = (float) Math.sin(a);
+            p.add(-0.5f); p.add(ny * 0.5f); p.add(nz * 0.5f);
+            n.add(0f); n.add(ny); n.add(nz); f.add(2f);
+            p.add(0.5f); p.add(ny * 0.5f); p.add(nz * 0.5f);
+            n.add(0f); n.add(ny); n.add(nz); f.add(2f);
+        }
+        for (int i = 0; i < segs; i++) {
+            short a = (short) (i * 2), b = (short) (i * 2 + 1), c = (short) (i * 2 + 2), d = (short) (i * 2 + 3);
+            idx.add(a); idx.add(b); idx.add(c);
+            idx.add(b); idx.add(d); idx.add(c);
+        }
+        // End caps at x = +0.5 and x = -0.5
+        for (int side = 0; side < 2; side++) {
+            float sx = side == 0 ? 0.5f : -0.5f;
+            float nx = side == 0 ? 1f : -1f;
+            float faceId = side == 0 ? 0f : 1f;
+            short center = (short) (p.size() / 3);
+            p.add(sx); p.add(0f); p.add(0f);
+            n.add(nx); n.add(0f); n.add(0f); f.add(faceId);
+            short start = (short) (p.size() / 3);
+            for (int i = 0; i <= segs; i++) {
+                double a = 2.0 * Math.PI * i / segs;
+                float cy = (float) Math.cos(a) * 0.5f, cz = (float) Math.sin(a) * 0.5f;
+                p.add(sx); p.add(cy); p.add(cz);
+                n.add(nx); n.add(0f); n.add(0f); f.add(faceId);
+            }
+            for (int i = 0; i < segs; i++) {
+                if (side == 0) { idx.add(center); idx.add((short) (start + i + 1)); idx.add((short) (start + i)); }
+                else { idx.add(center); idx.add((short) (start + i)); idx.add((short) (start + i + 1)); }
+            }
+        }
+        cylPositions = floatBuffer(toFloatArr(p));
+        cylNormals = floatBuffer(toFloatArr(n));
+        cylFaces = floatBuffer(toFloatArr(f));
+        cylIndices = shortBuffer(toShortArr(idx));
+        cylIndexCount = idx.length;
+    }
+
+    private void buildWedge() {
+        float invSqrt2 = 0.70710678f;
+        float[] pos = {
+            // Bottom (-Y)
+            -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f,-0.5f, 0.5f, -0.5f,-0.5f, 0.5f,
+            // Back (+Z)
+            -0.5f,-0.5f, 0.5f,  0.5f,-0.5f, 0.5f,  0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f,
+            // Slope (+Y, -Z)
+            -0.5f,-0.5f,-0.5f, -0.5f, 0.5f, 0.5f,  0.5f, 0.5f, 0.5f,  0.5f,-0.5f,-0.5f,
+            // Left (-X)
+            -0.5f,-0.5f,-0.5f, -0.5f,-0.5f, 0.5f, -0.5f, 0.5f, 0.5f,
+            // Right (+X)
+             0.5f,-0.5f,-0.5f,  0.5f, 0.5f, 0.5f,  0.5f,-0.5f, 0.5f
+        };
+        float[] norm = {
+            0,-1,0, 0,-1,0, 0,-1,0, 0,-1,0,
+            0,0,1, 0,0,1, 0,0,1, 0,0,1,
+            0,invSqrt2,-invSqrt2, 0,invSqrt2,-invSqrt2, 0,invSqrt2,-invSqrt2, 0,invSqrt2,-invSqrt2,
+            -1,0,0, -1,0,0, -1,0,0,
+            1,0,0, 1,0,0, 1,0,0
+        };
+        float[] faces = {3,3,3,3, 4,4,4,4, 2,2,2,2, 1,1,1, 0,0,0};
+        short[] idx = {
+            0,2,1, 0,3,2,
+            4,5,6, 4,6,7,
+            8,10,9, 8,11,10,
+            12,13,14,
+            15,16,17
+        };
+        wedgePositions = floatBuffer(pos);
+        wedgeNormals = floatBuffer(norm);
+        wedgeFaces = floatBuffer(faces);
+        wedgeIndices = shortBuffer(idx);
+        wedgeIndexCount = idx.length;
+    }
+
+    private static float[] toFloatArr(ArrayList<Float> list) {
+        float[] a = new float[list.size()];
+        for (int i = 0; i < a.length; i++) a[i] = list.get(i);
+        return a;
+    }
+    private static short[] toShortArr(ArrayList<Short> list) {
+        short[] a = new short[list.size()];
+        for (int i = 0; i < a.length; i++) a[i] = list.get(i);
+        return a;
     }
 
     private static FloatBuffer floatBuffer(float[] data) {
@@ -483,6 +636,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             Matrix.setLookAtM(mView, 0, (float) scene.camEye[0], (float) scene.camEye[1], (float) scene.camEye[2],
                     (float) scene.camTarget[0], (float) scene.camTarget[1], (float) scene.camTarget[2], 0, 1, 0);
             Matrix.multiplyMM(mVp, 0, mProj, 0, mView, 0);
+            extractFrustum(mVp);
             synchronized (scene) { System.arraycopy(mVp, 0, scene.viewProjection, 0, 16); }
 
             boolean post = light.needsPost() && ensureTargets(viewportWidth, viewportHeight);
@@ -709,10 +863,38 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    private void extractFrustum(float[] m) {
+        setPlane(0, m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12]);
+        setPlane(1, m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]);
+        setPlane(2, m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13]);
+        setPlane(3, m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]);
+        setPlane(4, m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]);
+        setPlane(5, m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]);
+    }
+
+    private void setPlane(int idx, float a, float b, float c, float d) {
+        float len = (float) Math.sqrt(a * a + b * b + c * c);
+        if (len < 1e-6f) len = 1f;
+        frustumPlanes[idx * 4] = a / len;
+        frustumPlanes[idx * 4 + 1] = b / len;
+        frustumPlanes[idx * 4 + 2] = c / len;
+        frustumPlanes[idx * 4 + 3] = d / len;
+    }
+
+    private boolean inFrustum(float cx, float cy, float cz, float radius) {
+        for (int i = 0; i < 6; i++) {
+            float d = frustumPlanes[i * 4] * cx + frustumPlanes[i * 4 + 1] * cy + frustumPlanes[i * 4 + 2] * cz + frustumPlanes[i * 4 + 3];
+            if (d < -radius) return false;
+        }
+        return true;
+    }
+
     private void drawPart(Instance part, EngineLighting light) {
         double[] c = part.cframe();
         double[] s = part.size();
         float sx = (float) Math.max(0.02, Math.abs(s[0])), sy = (float) Math.max(0.02, Math.abs(s[1])), sz = (float) Math.max(0.02, Math.abs(s[2]));
+        float boundR = (float) Math.sqrt(sx * sx + sy * sy + sz * sz) * 0.55f;
+        if (!inFrustum((float) c[0], (float) c[1], (float) c[2], boundR)) return;
         setModel(c, sx, sy, sz);
         int color = part.getColor();
         float r = ((color >> 16) & 0xFF) / 255f, g = ((color >> 8) & 0xFF) / 255f, b = (color & 0xFF) / 255f;
@@ -733,7 +915,14 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             int tile = textures.spawnTile();
             setTileUniform(uSpawnTile, tile, textures.tileStuds(tile));
         }
-        drawBox(r, g, b, alpha, material, light.specularScale + reflectance, spawn ? 1f : 0f,
+        int meshKind = 1;
+        if ("WedgePart".equals(part.className) || "CornerWedgePart".equals(part.className)) meshKind = 3;
+        else if ("Part".equals(part.className)) {
+            int shape = part.getInt("Shape", 1);
+            if (shape == 0) meshKind = 0;
+            else if (shape == 2) meshKind = 2;
+        }
+        drawMesh(meshKind, r, g, b, alpha, material, light.specularScale + reflectance, spawn ? 1f : 0f,
                 assetTexture != 0 ? assetTexture : (sampleAtlas ? atlas : 0),
                 assetTexture != 0 ? 1f : 0f, assetFaceIndex);
     }
@@ -779,10 +968,16 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
     private void drawBox(float r, float g, float b, float alpha, EngineMaterial material, double specular,
                          float isSpawn, int assetTexture, float hasAsset, int assetFace) {
+        drawMesh(1, r, g, b, alpha, material, specular, isSpawn, assetTexture, hasAsset, assetFace);
+    }
+
+    private void drawMesh(int kind, float r, float g, float b, float alpha, EngineMaterial material, double specular,
+                          float isSpawn, int assetTexture, float hasAsset, int assetFace) {
         GLES20.glUseProgram(program);
         GLES20.glUniformMatrix4fv(uMvp, 1, false, mMvp, 0);
         GLES20.glUniformMatrix4fv(uModel, 1, false, mModel, 0);
         GLES20.glUniformMatrix3fv(uNormal, 1, false, normal3, 0);
+        GLES20.glUniform1f(uUseCustomNorm, kind == 1 ? 0f : 1f);
         GLES20.glUniform3f(uColor, r, g, b);
         GLES20.glUniform1f(uAlpha, alpha);
         GLES20.glUniform1f(uRough, (float) material.roughness);
@@ -797,17 +992,23 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1i(uAsset, 1);
         bindTexture(1, assetTexture != 0 ? assetTexture : textures.atlasTexture());
         GLES20.glUniform1i(uAtlas, 0);
+        FloatBuffer posBuf = cubePositions, normBuf = cubePositions, fBuf = faceBuffer;
+        ShortBuffer idxBuf = cubeIndices;
+        int idxCount = 36;
+        if (kind == 0 && spherePositions != null) { posBuf = spherePositions; normBuf = sphereNormals; fBuf = sphereFaces; idxBuf = sphereIndices; idxCount = sphereIndexCount; }
+        else if (kind == 2 && cylPositions != null) { posBuf = cylPositions; normBuf = cylNormals; fBuf = cylFaces; idxBuf = cylIndices; idxCount = cylIndexCount; }
+        else if (kind == 3 && wedgePositions != null) { posBuf = wedgePositions; normBuf = wedgeNormals; fBuf = wedgeFaces; idxBuf = wedgeIndices; idxCount = wedgeIndexCount; }
         GLES20.glEnableVertexAttribArray(aPos);
-        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
+        GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, posBuf);
         if (aLocal >= 0) {
             GLES20.glEnableVertexAttribArray(aLocal);
-            GLES20.glVertexAttribPointer(aLocal, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
+            GLES20.glVertexAttribPointer(aLocal, 3, GLES20.GL_FLOAT, false, 0, normBuf);
         }
         if (aFace >= 0) {
             GLES20.glEnableVertexAttribArray(aFace);
-            GLES20.glVertexAttribPointer(aFace, 1, GLES20.GL_FLOAT, false, 0, faceBuffer);
+            GLES20.glVertexAttribPointer(aFace, 1, GLES20.GL_FLOAT, false, 0, fBuf);
         }
-        GLES20.glDrawElements(GLES20.GL_TRIANGLES, 36, GLES20.GL_UNSIGNED_SHORT, cubeIndices);
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, idxCount, GLES20.GL_UNSIGNED_SHORT, idxBuf);
         GLES20.glDisableVertexAttribArray(aPos);
         if (aLocal >= 0) GLES20.glDisableVertexAttribArray(aLocal);
         if (aFace >= 0) GLES20.glDisableVertexAttribArray(aFace);
@@ -823,40 +1024,67 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
                 -hx, -hy, -hz, -hx, hy, -hz, hx, -hy, -hz, hx, hy, -hz, hx, -hy, hz, hx, hy, hz, -hx, -hy, hz, -hx, hy, hz
         };
         setModel(c, 1, 1, 1);
-        FloatBuffer buf = floatBuffer(pts);
+        outlineBuffer.clear();
+        outlineBuffer.put(pts, 0, 72);
+        outlineBuffer.position(0);
         GLES20.glUseProgram(lineProgram);
         GLES20.glUniformMatrix4fv(lMvp, 1, false, mMvp, 0);
         GLES20.glUniform3f(lColor, 0.25f, 0.55f, 1f);
         GLES20.glUniform1f(lAlpha, 1f);
         GLES20.glLineWidth(2.5f);
         GLES20.glEnableVertexAttribArray(lPos);
-        GLES20.glVertexAttribPointer(lPos, 3, GLES20.GL_FLOAT, false, 0, buf);
+        GLES20.glVertexAttribPointer(lPos, 3, GLES20.GL_FLOAT, false, 0, outlineBuffer);
         GLES20.glDrawArrays(GLES20.GL_LINES, 0, 24);
         GLES20.glDisableVertexAttribArray(lPos);
         GLES20.glLineWidth(1f);
     }
 
     private void drawCharacter(EngineLighting light) {
+        if (scene.firstPerson) return;
         double[] p = scene.charPos;
-        double yaw = scene.charYaw;
+        double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
         float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
         EngineMaterial skin = EngineMaterial.of(256);
-        charBox(p, cy, sy, 0, 3f, 0, 2, 2, 1, TORSO, skin, light);
-        charBox(p, cy, sy, 0, 4.63f, 0, 1.25f, 1.25f, 1.25f, HEAD, skin, light);
-        charBox(p, cy, sy, -1.5f, 3f, 0, 1, 2, 1, LIMB, skin, light);
-        charBox(p, cy, sy, 1.5f, 3f, 0, 1, 2, 1, LIMB, skin, light);
-        charBox(p, cy, sy, -0.55f, 1f, 0, 1, 2, 1, LIMB, skin, light);
-        charBox(p, cy, sy, 0.55f, 1f, 0, 1, 2, 1, LIMB, skin, light);
+        float speedFrac = (float) Math.min(1.0, scene.charSpeed / Math.max(1.0, scene.walkSpeed));
+        float swing = (float) Math.sin(scene.charWalkPhase) * 0.65f * speedFrac;
+        float bob = scene.onGround ? Math.abs((float) Math.sin(scene.charWalkPhase)) * 0.14f * speedFrac : 0f;
+        float armPitchL = scene.onGround ? -swing : -2.3f;
+        float armPitchR = scene.onGround ? swing : -2.3f;
+        float legPitchL = scene.onGround ? swing : 0.35f;
+        float legPitchR = scene.onGround ? -swing : -0.25f;
+        float[] pants = {0.18f, 0.28f, 0.45f};
+        float[] eyeCol = {0.08f, 0.09f, 0.12f};
+
+        charPart(p, cy, sy, 0, 3.0f + bob, 0, 0, 0, 2.0f, 2.0f, 1.0f, TORSO, skin, light, 1);
+        charPart(p, cy, sy, 0, 4.62f + bob, 0, 0, 0, 1.2f, 1.2f, 1.2f, HEAD, skin, light, 0);
+        charPart(p, cy, sy, -0.24f, 4.72f + bob, 0.56f, 0, 0, 0.14f, 0.18f, 0.10f, eyeCol, skin, light, 1);
+        charPart(p, cy, sy, 0.24f, 4.72f + bob, 0.56f, 0, 0, 0.14f, 0.18f, 0.10f, eyeCol, skin, light, 1);
+        charPart(p, cy, sy, 0f, 4.44f + bob, 0.56f, 0, 0, 0.38f, 0.08f, 0.10f, eyeCol, skin, light, 1);
+        charPart(p, cy, sy, -1.52f, 3.9f + bob, 0, -0.9f, armPitchL, 0.95f, 1.95f, 0.95f, HEAD, skin, light, 1);
+        charPart(p, cy, sy, 1.52f, 3.9f + bob, 0, -0.9f, armPitchR, 0.95f, 1.95f, 0.95f, HEAD, skin, light, 1);
+        charPart(p, cy, sy, -0.52f, 1.95f + bob, 0, -0.95f, legPitchL, 0.96f, 1.95f, 0.96f, pants, skin, light, 1);
+        charPart(p, cy, sy, 0.52f, 1.95f + bob, 0, -0.95f, legPitchR, 0.96f, 1.95f, 0.96f, pants, skin, light, 1);
     }
 
-    private void charBox(double[] origin, float cy, float sy, float ox, float oyAboveFeet, float oz, float w, float h, float d, float[] color, EngineMaterial material, EngineLighting light) {
-        double wx = origin[0] + (ox * cy + oz * sy);
-        double wz = origin[2] + (-ox * sy + oz * cy);
-        double wy = origin[1] - scene.charHy + oyAboveFeet;
-        double[] c = {wx, wy, wz, cy, 0, sy, 0, 1, 0, -sy, 0, cy};
+    private void charPart(double[] origin, float cy, float sy, float ox, float pivotYAboveFeet, float oz,
+                          float localOffsetY, float pitchX, float w, float h, float d,
+                          float[] color, EngineMaterial material, EngineLighting light, int meshKind) {
+        float cp = (float) Math.cos(pitchX), sp = (float) Math.sin(pitchX);
+        float ly = localOffsetY * cp;
+        float lz = localOffsetY * sp;
+        float rx = ox;
+        float rz = oz + lz;
+        double wx = origin[0] + (rx * cy + rz * sy);
+        double wz = origin[2] + (-rx * sy + rz * cy);
+        double wy = origin[1] - scene.charHy + pivotYAboveFeet + ly;
+        double[] c = {
+            wx, wy, wz,
+            cy, sy * sp, sy * cp,
+            0, cp, -sp,
+            -sy, cy * sp, cy * cp
+        };
         setModel(c, w, h, d);
         int materialTile = textures.materialTile(256);
-        FloatBuffer previous = null;
         for (int face = 0; face < 6; face++) {
             faceTiles[face * 4] = (materialTile % EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES;
             faceTiles[face * 4 + 1] = (materialTile / EngineTextures.ATLAS_TILES) / (float) EngineTextures.ATLAS_TILES;
@@ -864,7 +1092,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             faceTiles[face * 4 + 3] = textures.atlasTexture() != 0 ? 1f : 0f;
         }
         GLES20.glUniform4fv(uFaceTiles, 6, faceTiles, 0);
-        drawBox(color[0], color[1], color[2], 1f, material, light.specularScale, 0f,
+        drawMesh(meshKind, color[0], color[1], color[2], 1f, material, light.specularScale, 0f,
                 textures.atlasTexture(), 0f, -1);
     }
 

@@ -1,62 +1,104 @@
 package dev.falix.studiomobile;
 
+import java.text.SimpleDateFormat;
 import java.util.*;
 
-/**
- * Editor + play state for one open place. UI thread issues edits; the GL thread renders and
- * steps character physics. Collision and picking use world AABBs (rotated parts are tested by
- * their bounding box), which keeps mobile physics fast and predictable.
- */
 final class EngineScene {
+    static final class OutputEntry {
+        final String time, level, message;
+        OutputEntry(String time, String level, String message) {
+            this.time = time;
+            this.level = level;
+            this.message = message;
+        }
+    }
+
+    interface OutputListener {
+        void onOutputChanged();
+    }
+
     Instance root;
     Instance workspace;
     Instance selection;
-    volatile int version = 1;                 // bumped on every tree/property change
+    volatile int version = 1;
     String placeName = "Place";
     final ArrayList<String> warnings = new ArrayList<>();
     final ArrayList<String> unmodeledWarnings = new ArrayList<>();
 
-    // ---- camera (orbit)
     volatile double camYaw = Math.toRadians(35), camPitch = Math.toRadians(-30), camDist = 34;
     final double[] camTarget = {0, 4, 0};
     final double[] camEye = {0, 20, 34};
 
-    // ---- edit tools
     double[] focusPoint = {0, 0, 0};
-    /** Studio tool: {@link EngineGizmo#MOVE}, ROTATE, SCALE or GRAB. */
     volatile int gizmoTool = EngineGizmo.MOVE;
-    /** View-projection matrix of the last rendered frame, published by the renderer for picking. */
     final float[] viewProjection = new float[16];
 
-    // ---- editor fly camera (on-screen joystick), each -1..1
     volatile double flyX, flyZ, flyUp;
     double flySpeed = 34;
-    /** Grid snapping for the transform tools, in studs (0 = off). */
+    volatile double flySpeedMultiplier = 1.0;
     double gridSnap;
 
-    // ---- play state (fields touched by both UI and GL threads are volatile)
     volatile boolean playing;
+    volatile boolean firstPerson;
     final double[] charPos = {0, 6, 0};
     final double[] charVel = {0, 0, 0};
     double charYaw;
     boolean onGround;
     double walkSpeed = 16, jumpPower = 50, gravity = 196.2;
     double charHx = 1, charHy = 2.5, charHz = 1;
-    volatile double moveX, moveZ;               // joystick input -1..1
+    volatile double charHealth = 100, charMaxHealth = 100;
+    volatile double charWalkPhase = 0, charSpeed = 0;
+    volatile double moveX, moveZ;
     volatile boolean jumpQueued;
     double renderYaw = Double.NaN;
 
-    // ---- caches
     int cacheVersion = -1;
-    /** Roblox Lighting/Sky/Atmosphere/Clouds/post-effects for this place; rebuilt with the cache. */
     volatile EngineLighting lighting = EngineLighting.from(null);
     final ArrayList<Instance> renderList = new ArrayList<>();
-    final ArrayList<double[]> colliders = new ArrayList<>();   // {cx,cy,cz,hx,hy,hz}
+    final ArrayList<double[]> colliders = new ArrayList<>();
     final ArrayList<Instance> colliderOwners = new ArrayList<>();
 
-    // ---- undo
     final ArrayDeque<String> undoStack = new ArrayDeque<>(), redoStack = new ArrayDeque<>();
     static final int UNDO_LIMIT = 40;
+
+    final ArrayList<OutputEntry> outputLog = new ArrayList<>();
+    private static final int MAX_OUTPUT_ENTRIES = 200;
+    private OutputListener outputListener;
+    private LuaRuntime.UiRefreshListener uiRefreshListener;
+    private LuaRuntime luaRuntime;
+    private String playSnapshot;
+    private final HashSet<Instance> touchedPrev = new HashSet<>();
+    private final HashSet<Instance> touchedNow = new HashSet<>();
+
+    void setOutputListener(OutputListener listener) { this.outputListener = listener; }
+    void setUiRefreshListener(LuaRuntime.UiRefreshListener listener) { this.uiRefreshListener = listener; }
+
+    LuaRuntime lua() {
+        if (luaRuntime == null) {
+            luaRuntime = new LuaRuntime(this, this::logOutput, () -> {
+                if (uiRefreshListener != null) uiRefreshListener.onUiChanged();
+            });
+        }
+        return luaRuntime;
+    }
+
+    void logOutput(String level, String message) {
+        String time = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+        synchronized (outputLog) {
+            outputLog.add(new OutputEntry(time, level, message == null ? "" : message));
+            while (outputLog.size() > MAX_OUTPUT_ENTRIES) outputLog.remove(0);
+        }
+        if (outputListener != null) outputListener.onOutputChanged();
+    }
+
+    void clearOutput() {
+        synchronized (outputLog) { outputLog.clear(); }
+        if (outputListener != null) outputListener.onOutputChanged();
+    }
+
+    void runCommand(String code) {
+        lua().runCommand(code);
+    }
 
     void setRoot(Instance dataModel, String name) {
         root = dataModel;
@@ -64,7 +106,12 @@ final class EngineScene {
         if (workspace == null) { workspace = new Instance("Workspace", "Workspace"); root.add(0, workspace); }
         placeName = name;
         for (Instance i : root.all(null)) {
-            if (i.className.equals("SpawnLocation")) { charPos[0] = i.cframe()[0]; charPos[1] = i.cframe()[1] + i.size()[1] / 2 + charHy + 1; charPos[2] = i.cframe()[2]; break; }
+            if (i.className.equals("SpawnLocation")) {
+                charPos[0] = i.cframe()[0];
+                charPos[1] = i.cframe()[1] + i.size()[1] / 2 + charHy + 1;
+                charPos[2] = i.cframe()[2];
+                break;
+            }
         }
         gravity = workspace.getNumber("Gravity", 196.2);
         refreshCache();
@@ -77,20 +124,21 @@ final class EngineScene {
         renderList.clear();
         colliders.clear();
         colliderOwners.clear();
-        for (Instance i : root.all(null)) {
-            if (i.isRenderable()) {
-                renderList.add(i);
-                if (i.getBool("CanCollide", true) && i.getNumber("Transparency", 0) < 0.95) {
-                    double[] b = i.bounds();
-                    colliders.add(new double[]{b[0], b[1], b[2], Math.max(b[3], .1), Math.max(b[4], .1), Math.max(b[5], .1)});
-                    colliderOwners.add(i);
+        if (root != null) {
+            for (Instance i : root.all(null)) {
+                if (i.isRenderable()) {
+                    renderList.add(i);
+                    if (i.getBool("CanCollide", true) && i.getNumber("Transparency", 0) < 0.95) {
+                        double[] b = i.bounds();
+                        colliders.add(new double[]{b[0], b[1], b[2], Math.max(b[3], .1), Math.max(b[4], .1), Math.max(b[5], .1)});
+                        colliderOwners.add(i);
+                    }
                 }
             }
         }
         cacheVersion = version;
     }
 
-    // ------------------------------------------------------------------ editing
     synchronized Instance insert(String cls) {
         pushUndo();
         String base = cls.equals("Part") ? "Part" : cls;
@@ -98,12 +146,20 @@ final class EngineScene {
         int n = 1;
         while (workspace.childNamed(name) != null) name = base + " " + (++n);
         Instance inst = Instance.create(cls, name);
+        if ("Script".equals(cls) || "LocalScript".equals(cls)) {
+            inst.props.put("Source", "print(\"Hello from " + name + "!\")\n");
+            inst.tags.put("Source", "ProtectedString");
+        } else if ("ModuleScript".equals(cls)) {
+            inst.props.put("Source", "local module = {}\n\nreturn module\n");
+            inst.tags.put("Source", "ProtectedString");
+        }
         double x = focusPoint[0], y = focusPoint[1], z = focusPoint[2];
         if (selection != null && selection.isRenderable()) {
             double[] p = selection.cframe();
             x = p[0]; y = p[1]; z = p[2];
             if (inst.props.containsKey("CFrame")) y += selection.size()[1] / 2 + inst.size()[1] / 2 + 0.1;
         } else if (inst.props.containsKey("CFrame")) y += inst.size()[1] / 2 + 0.25;
+        if (inst.props.containsKey("CFrame")) inst.setPosition(x, y, z);
         Instance parent = insertParent(cls);
         parent.add(inst);
         selection = inst;
@@ -111,16 +167,15 @@ final class EngineScene {
         return inst;
     }
 
-    /**
-     * Where a new instance belongs, the way Studio files things: effects and descriptors stay with
-     * the part or service that owns them, Lighting classes go into Lighting, and everything else
-     * lands in the selected container or Workspace.
-     */
     Instance insertParent(String cls) {
         Instance target = selection;
         if (target != null && !target.isService() && !target.className.equals("Model") && !target.className.equals("Folder")
                 && !target.className.equals("Terrain") && !target.className.equals("Camera")) {
             if (PART_CHILD.contains(cls) && target.isRenderable()) return target;
+            if (("ScreenGui".equals(target.className) || "Frame".equals(target.className))
+                    && ("Frame".equals(cls) || "TextLabel".equals(cls) || "TextButton".equals(cls) || "LocalScript".equals(cls))) {
+                return target;
+            }
             target = null;
         }
         if (target != null) return target;
@@ -129,9 +184,9 @@ final class EngineScene {
         return workspace == null ? root : workspace;
     }
 
-    private static final java.util.HashSet<String> PART_CHILD = new java.util.HashSet<>(java.util.Arrays.asList(
+    private static final HashSet<String> PART_CHILD = new HashSet<>(Arrays.asList(
             "Decal", "Texture", "SurfaceAppearance", "ParticleEmitter", "Fire", "Smoke", "Sparkles", "Trail", "Beam",
-            "PointLight", "SpotLight", "SurfaceLight", "Attachment", "Sound"));
+            "PointLight", "SpotLight", "SurfaceLight", "Attachment", "Sound", "Script", "LocalScript"));
 
     private static final HashMap<String, String> SERVICE_HOME = new HashMap<>();
     static {
@@ -139,6 +194,8 @@ final class EngineScene {
                 "SunRaysEffect", "DepthOfFieldEffect", "ColorGradingEffect"}) SERVICE_HOME.put(cls, "Lighting");
         for (String cls : new String[]{"Clouds", "Terrain"}) SERVICE_HOME.put(cls, "Workspace");
         for (String cls : new String[]{"ScreenGui", "BillboardGui", "SurfaceGui"}) SERVICE_HOME.put(cls, "StarterGui");
+        SERVICE_HOME.put("Script", "ServerScriptService");
+        SERVICE_HOME.put("ModuleScript", "ReplicatedStorage");
     }
 
     private Instance serviceFor(String cls) {
@@ -176,8 +233,10 @@ final class EngineScene {
         Instance copy = new Instance(source.className, newName);
         copy.props.putAll(source.props);
         copy.tags.putAll(source.tags);
-        double[] c = source.cframe();
-        copy.setCframe(c.clone());
+        if (source.props.containsKey("CFrame")) {
+            double[] c = source.cframe();
+            copy.setCframe(c.clone());
+        }
         for (Instance child : source.children) copy.add(deepCopy(child, child.name));
         return copy;
     }
@@ -224,7 +283,7 @@ final class EngineScene {
 
     synchronized void pushUndo() {
         if (root == null) return;
-        if (count(root) > 4000) { undoStack.clear(); redoStack.clear(); return; }   // snapshots stay affordable
+        if (count(root) > 4000) { undoStack.clear(); redoStack.clear(); return; }
         undoStack.push(capture());
         while (undoStack.size() > UNDO_LIMIT) undoStack.removeLast();
         redoStack.clear();
@@ -239,8 +298,7 @@ final class EngineScene {
     }
 
     synchronized String capture() {
-        Instance copy = root;
-        return PlaceWriter.generate(copy);
+        return PlaceWriter.generate(root);
     }
 
     synchronized void undo() {
@@ -266,7 +324,6 @@ final class EngineScene {
         } catch (Exception ignored) { }
     }
 
-    /** Parses a full <roblox> document produced by capture(); reuses the XML reader on a temp file. */
     static Instance parseFragment(String xml) throws Exception {
         java.io.File tmp = java.io.File.createTempFile("undo-", ".rbxlx");
         try {
@@ -277,7 +334,6 @@ final class EngineScene {
         } finally { tmp.delete(); }
     }
 
-    // ------------------------------------------------------------------ picking
     Instance pick(double[] rayOrigin, double[] rayDir) {
         Instance bestInstance = null;
         double best = Double.MAX_VALUE;
@@ -303,25 +359,61 @@ final class EngineScene {
         return tmin < 0 ? (tmax < 0 ? -1 : tmax) : tmin;
     }
 
-    // ------------------------------------------------------------------ play mode
     synchronized void startPlay() {
+        if (root != null && count(root) <= 6000) {
+            try { playSnapshot = capture(); } catch (Exception ignored) { playSnapshot = null; }
+        } else {
+            playSnapshot = null;
+        }
         playing = true;
+        walkSpeed = 16;
+        jumpPower = 50;
+        charHealth = charMaxHealth = 100;
+        charWalkPhase = 0;
+        charSpeed = 0;
         charVel[0] = charVel[1] = charVel[2] = 0;
         moveX = moveZ = 0;
         onGround = false;
-        renderYaw = Double.NaN;
+        touchedPrev.clear();
+        touchedNow.clear();
+        renderYaw = camYaw;
         grav();
         double[] spawn = spawnPoint();
         charPos[0] = spawn[0]; charPos[1] = spawn[1]; charPos[2] = spawn[2];
         charYaw = camYaw;
-        camDist = 16;
+        camDist = firstPerson ? 1.0 : 16;
         if (camPitch > -0.15) camPitch = -Math.toRadians(18);
+        lua().startPlayScripts();
     }
 
-    synchronized void stopPlay() { playing = false; }
+    synchronized void stopPlay() {
+        playing = false;
+        if (luaRuntime != null) luaRuntime.stop();
+        touchedPrev.clear();
+        touchedNow.clear();
+        if (playSnapshot != null) {
+            String snap = playSnapshot;
+            playSnapshot = null;
+            restore(snap);
+        }
+        logOutput("info", "Playtest stopped");
+    }
+
+    synchronized void damageCharacter(double amount) {
+        charHealth = Math.max(0, charHealth - amount);
+        if (charHealth <= 0) respawnCharacter();
+    }
+
+    synchronized void respawnCharacter() {
+        charHealth = charMaxHealth;
+        double[] spawn = spawnPoint();
+        charPos[0] = spawn[0]; charPos[1] = spawn[1]; charPos[2] = spawn[2];
+        charVel[0] = charVel[1] = charVel[2] = 0;
+        onGround = false;
+    }
 
     double[] spawnPoint() {
-        Instance spawn = root.findFirst("SpawnLocation");
+        Instance spawn = root == null ? null : root.findFirst("SpawnLocation");
         if (spawn != null && spawn.getBool("Enabled", true)) {
             double[] c = spawn.cframe();
             return new double[]{c[0], c[1] + spawn.size()[1] / 2 + charHy + 0.1, c[2]};
@@ -336,7 +428,6 @@ final class EngineScene {
         if (g instanceof Number) gravity = ((Number) g).doubleValue();
     }
 
-    /** Advances character physics; called from the GL thread. */
     synchronized void step(double dt) {
         if (!playing) return;
         dt = Math.min(dt, 0.05);
@@ -351,16 +442,41 @@ final class EngineScene {
         }
         charVel[0] = wishX;
         charVel[2] = wishZ;
+        charSpeed = Math.hypot(wishX, wishZ);
+        if (charSpeed > 0.2 && onGround) {
+            charWalkPhase += dt * (charSpeed * 0.55);
+        } else if (onGround) {
+            charWalkPhase *= Math.max(0, 1.0 - dt * 10.0);
+        }
+        if (Double.isNaN(renderYaw)) renderYaw = charYaw;
+        else {
+            double diff = charYaw - renderYaw;
+            while (diff > Math.PI) diff -= 2 * Math.PI;
+            while (diff < -Math.PI) diff += 2 * Math.PI;
+            renderYaw += diff * Math.min(1.0, dt * 14.0);
+        }
+
         charVel[1] -= gravity * dt;
         if (jumpQueued && onGround) { charVel[1] = jumpPower; onGround = false; }
         jumpQueued = false;
         if (charVel[1] < -300) charVel[1] = -300;
 
+        touchedNow.clear();
         onGround = false;
         moveAxis(0, charVel[0] * dt);
         moveAxis(2, charVel[2] * dt);
         moveAxis(1, charVel[1] * dt);
-        if (charPos[1] < -150) { double[] spawn = spawnPoint(); charPos[0] = spawn[0]; charPos[1] = spawn[1]; charPos[2] = spawn[2]; charVel[0] = charVel[1] = charVel[2] = 0; }
+
+        if (luaRuntime != null && luaRuntime.isRunning()) {
+            for (Instance part : touchedNow) {
+                if (!touchedPrev.contains(part)) luaRuntime.fireTouched(part);
+            }
+            touchedPrev.clear();
+            touchedPrev.addAll(touchedNow);
+            luaRuntime.stepHeartbeat(dt);
+        }
+
+        if (charPos[1] < -150) respawnCharacter();
     }
 
     void moveAxis(int axis, double delta) {
@@ -370,6 +486,7 @@ final class EngineScene {
         for (int i = 0; i < colliders.size(); i++) {
             double[] box = colliders.get(i);
             if (!overlaps(self, box)) continue;
+            if (i < colliderOwners.size()) touchedNow.add(colliderOwners.get(i));
             double comp = axis == 0 ? self[3] + box[3] : axis == 1 ? self[4] + box[4] : self[5] + box[5];
             double dist = charPos[axis] - box[axis];
             if (dist > 0) charPos[axis] = box[axis] + comp;
@@ -388,7 +505,8 @@ final class EngineScene {
     void moveCamera(double dYaw, double dPitch, double dZoom, boolean pan, double px, double py) {
         camYaw += dYaw;
         camPitch = Math.max(-Math.toRadians(88), Math.min(Math.toRadians(20), camPitch + dPitch));
-        camDist = Math.max(8, Math.min(220, camDist * (1 + dZoom)));
+        camDist = Math.max(playing ? 1.0 : 8.0, Math.min(220, camDist * (1 + dZoom)));
+        if (playing) firstPerson = camDist < 2.2;
         if (pan) {
             double cy = Math.cos(camYaw), sy = Math.sin(camYaw);
             camTarget[0] -= (px * cy - py * sy) * camDist * 0.0015;
@@ -396,11 +514,6 @@ final class EngineScene {
         }
     }
 
-    /**
-     * Editor fly camera, driven by the on-screen joystick and run from the GL thread. Moving the
-     * orbit target is enough because {@link #updateEye()} derives the eye from it every frame, and
-     * pushing forward while looking up climbs, exactly like Roblox Studio's WASD fly camera.
-     */
     void flyEditCamera(double dt) {
         if (playing || dt <= 0) return;
         double mx = flyX, mz = flyZ, mu = flyUp;
@@ -410,28 +523,23 @@ final class EngineScene {
         double[] forward = normalize(camTarget[0] - camEye[0], camTarget[1] - camEye[1], camTarget[2] - camEye[2]);
         double[] right = normalize(cross(forward, new double[]{0, 1, 0}));
         double[] up = cross(right, forward);
-        double step = flySpeed * Math.min(1, magnitude) * dt;
+        double step = flySpeed * flySpeedMultiplier * Math.min(1, magnitude) * dt;
         camTarget[0] += (right[0] * mx + forward[0] * mz + up[0] * mu) * step;
         camTarget[1] += (right[1] * mx + forward[1] * mz + up[1] * mu) * step;
         camTarget[2] += (right[2] * mx + forward[2] * mz + up[2] * mu) * step;
     }
 
-    // ------------------------------------------------------------------ gizmo dragging
     private boolean dragging;
     private int dragTool = -1, dragAxis = -1;
     private double[] dragStartCframe, dragStartAxis, dragCenter;
     private double dragStartParameter, dragStartAngle, dragHandleLength, dragStartScale;
     private double[] dragPlaneNormal, dragPlanePoint;
-    private boolean dragPushed;                 // undo is captured on the first real movement
+    private boolean dragPushed;
 
     boolean isDragging() { return dragging; }
     int dragTool() { return dragTool; }
     int dragAxis() { return dragAxis; }
 
-    /**
-     * Starts a handle drag. `handleLength` is the same world length the renderer draws the handles
-     * with, so a drag of one handle length doubles a scale or moves one handle length.
-     */
     synchronized boolean beginGizmoDrag(int tool, int axis, double[] rayOrigin, double[] rayDir, double handleLength) {
         if (selection == null || selection.isService() || playing) return false;
         if (tool != EngineGizmo.GRAB && !selection.isRenderable()) return false;
@@ -454,7 +562,6 @@ final class EngineScene {
             dragStartAngle = EngineGizmo.ringAngle(rayOrigin, rayDir, dragCenter, axis);
             if (Double.isNaN(dragStartAngle)) return false;
         } else {
-            // Grab: slide along the plane through the part that faces the camera.
             double[] normal = normalize(camEye[0] - c[0], camEye[1] - c[1], camEye[2] - c[2]);
             dragPlaneNormal = normal;
             dragPlanePoint = EngineGizmo.rayPlanePoint(rayOrigin, rayDir, dragCenter, normal);
@@ -465,7 +572,6 @@ final class EngineScene {
         return true;
     }
 
-    /** Applies the current touch ray to the running drag. */
     synchronized void updateGizmoDrag(double[] rayOrigin, double[] rayDir) {
         if (!dragging || selection == null || dragStartCframe == null) return;
         if (!dragPushed) { pushUndo(); dragPushed = true; }
@@ -527,7 +633,6 @@ final class EngineScene {
         camPitch = -Math.toRadians(25);
     }
 
-    /** Ray through a normalized device point (-1..1), from the current camera. Returns {origin, dir}. */
     double[][] screenRay(double ndcX, double ndcY, double aspect, double fovDeg) {
         double[] eye = camEye;
         double[] forward = normalize(camTarget[0] - eye[0], camTarget[1] - eye[1], camTarget[2] - eye[2]);
@@ -552,15 +657,24 @@ final class EngineScene {
         return new double[]{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
     }
 
-    /** Updates camEye from yaw/pitch/dist; called by the renderer each frame. */
     void updateEye() {
         double rx = camDist * Math.cos(camPitch) * Math.sin(camYaw);
         double ry = camDist * -Math.sin(camPitch);
         double rz = camDist * Math.cos(camPitch) * Math.cos(camYaw);
         if (playing) {
-            double tx = charPos[0], ty = charPos[1] + 1.5, tz = charPos[2];
-            camEye[0] = tx + rx; camEye[1] = ty + Math.max(ry, -2) + 3; camEye[2] = tz + rz;
-            camTarget[0] = tx; camTarget[1] = ty; camTarget[2] = tz;
+            if (firstPerson) {
+                double hy = charPos[1] - charHy + 4.55;
+                camEye[0] = charPos[0];
+                camEye[1] = hy;
+                camEye[2] = charPos[2];
+                camTarget[0] = camEye[0] - Math.cos(camPitch) * Math.sin(camYaw) * 4.0;
+                camTarget[1] = camEye[1] + Math.sin(camPitch) * 4.0;
+                camTarget[2] = camEye[2] - Math.cos(camPitch) * Math.cos(camYaw) * 4.0;
+            } else {
+                double tx = charPos[0], ty = charPos[1] + 1.5, tz = charPos[2];
+                camEye[0] = tx + rx; camEye[1] = ty + Math.max(ry, -2) + 3; camEye[2] = tz + rz;
+                camTarget[0] = tx; camTarget[1] = ty; camTarget[2] = tz;
+            }
         } else {
             camEye[0] = camTarget[0] + rx; camEye[1] = camTarget[1] + ry; camEye[2] = camTarget[2] + rz;
         }

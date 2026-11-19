@@ -3,7 +3,6 @@ import android.content.Context;
 import android.graphics.*;
 import android.view.View;
 
-/** Crisp native vector primitives, no emoji icons or borrowed identity assets. */
 final class StudioIcon extends View {
     final String kind;final Paint paint=new Paint(3);int color;
     StudioIcon(Context c,String kind,int color){super(c);this.kind=kind;this.color=color;setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);}
@@ -28,6 +27,12 @@ final class StudioIcon extends View {
             case "cube":path(canvas,new float[]{12,3,21,7.5f,21,16.5f,12,21,3,16.5f,3,7.5f,12,3});canvas.drawLine(12,12,12,21,paint);canvas.drawLine(3,7.5f,12,12,paint);canvas.drawLine(21,7.5f,12,12,paint);break;
             case "model":path(canvas,new float[]{12,3,20,7,20,15,12,19,4,15,4,7,12,3});break;
             case "script":path(canvas,new float[]{6,2,15,2,19,6,19,22,6,22,6,2});path(canvas,new float[]{15,2,15,6,19,6});canvas.drawLine(9,11,16,11,paint);canvas.drawLine(9,14,16,14,paint);canvas.drawLine(9,17,14,17,paint);break;
+            case "code":path(canvas,new float[]{8,7,3,12,8,17});path(canvas,new float[]{16,7,21,12,16,17});canvas.drawLine(14,5,10,19,paint);break;
+            case "terminal":canvas.drawRoundRect(new RectF(3,4,21,20),2,2,paint);path(canvas,new float[]{7,9,10,12,7,15});canvas.drawLine(12,15,17,15,paint);break;
+            case "toolbox":canvas.drawRoundRect(new RectF(3,7,21,20),2,2,paint);path(canvas,new float[]{8,7,8,4,16,4,16,7});canvas.drawLine(3,12,21,12,paint);canvas.drawLine(10,12,10,15,paint);canvas.drawLine(14,12,14,15,paint);break;
+            case "eye":path(canvas,new float[]{2,12,6,7,12,5,18,7,22,12,18,17,12,19,6,17,2,12});canvas.drawCircle(12,12,3,paint);break;
+            case "speed":canvas.drawArc(new RectF(3,5,21,23),180,180,false,paint);canvas.drawLine(12,15,17,9,paint);canvas.drawCircle(12,15,1.5f,paint);break;
+            case "close":canvas.drawLine(6,6,18,18,paint);canvas.drawLine(18,6,6,18,paint);break;
             case "light":canvas.drawCircle(12,10,4,paint);canvas.drawLine(9,15,15,15,paint);canvas.drawLine(10,18,14,18,paint);canvas.drawLine(11,21,13,21,paint);break;
             case "camera":path(canvas,new float[]{3,7,8,7,10,4,14,4,16,7,21,7,21,19,3,19,3,7});canvas.drawCircle(12,13,4,paint);break;
             case "spawn":canvas.drawLine(7,3,7,21,paint);path(canvas,new float[]{7,4,19,7,7,11});break;
@@ -39,7 +44,7 @@ final class StudioIcon extends View {
             case "undo":path(canvas,new float[]{9,7,4,12,9,17});canvas.drawArc(new RectF(4,4,20,20),180,180,false,paint);break;
             case "redo":path(canvas,new float[]{15,7,20,12,15,17});canvas.drawArc(new RectF(4,4,20,20),0,180,false,paint);break;
             case "play":paint.setStyle(Paint.Style.FILL);pathFill(canvas,new float[]{8,5,19,12,8,19});break;
-            case "stop":canvas.drawRect(6,6,18,18,paint);break;
+            case "stop":paint.setStyle(Paint.Style.FILL);canvas.drawRoundRect(new RectF(6,6,18,18),2,2,paint);break;
             case "save":path(canvas,new float[]{4,4,17,4,20,7,20,20,4,20,4,4});canvas.drawRect(8,4,16,9,paint);canvas.drawRect(7,13,17,20,paint);break;
             case "trash":canvas.drawLine(4,7,20,7,paint);path(canvas,new float[]{6,7,7,21,17,21,18,7});canvas.drawLine(9,7,9.5f,4,paint);canvas.drawLine(15,7,14.5f,4,paint);canvas.drawLine(10,4,14,4,paint);break;
             case "copy":canvas.drawRect(8,3,20,15,paint);canvas.drawRect(4,8,16,21,paint);break;

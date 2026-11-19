@@ -28,17 +28,31 @@ public final class EngineActivity extends Activity {
     private final EngineScene scene = new EngineScene();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private EngineView viewport;
-    private LinearLayout explorerList, propertyList, toolStrip;
-    private View explorerPanel, propertiesPanel, viewportBox, explorerSeparator, propertiesSeparator;
+    private LinearLayout explorerList, propertyList, toolStrip, toolboxList, outputList, guiOverlay;
+    private LinearLayout playButtonContainer;
+    private StudioIcon playIconView;
+    private View explorerPanel, propertiesPanel, toolboxPanel, outputPanel, viewportBox, explorerSeparator, propertiesSeparator;
+    private ScriptEditorView scriptEditor;
     private boolean narrowScreen;
     private int explorerWidth, propertiesWidth;
-    private TextView title, subtitle, playLabel, explorerCount;
-    private EditText explorerSearch;
+    private TextView title, subtitle, playLabel, explorerCount, flySpeedPill, camModePill, healthLabel;
+    private EditText explorerSearch, commandInput;
     private FrameLayout viewportLayer;
     private TextView rendererError;
     private JoystickView joystick, liftPad;
     private View jumpButton;
     private View playControls, flyControls;
+    private String toolboxCategory = "All";
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable healthPoll = new Runnable() {
+        @Override public void run() {
+            if (scene.playing && healthLabel != null) {
+                healthLabel.setText("HP " + (int) Math.round(scene.charHealth) + "/" + (int) Math.round(scene.charMaxHealth));
+                if (camModePill != null) camModePill.setText(scene.firstPerson ? "1P" : "3P");
+                uiHandler.postDelayed(this, 180);
+            }
+        }
+    };
     private final HashSet<Instance> expanded = new HashSet<>();
     private final HashSet<Instance> collapsed = new HashSet<>();
 
@@ -159,9 +173,20 @@ public final class EngineActivity extends Activity {
 
     @Override protected void onResume() { super.onResume(); enterFullscreen(); if (viewport != null) viewport.onResume(); }
     @Override protected void onPause() { if (viewport != null) viewport.onPause(); super.onPause(); }
-    @Override protected void onDestroy() { worker.shutdownNow(); super.onDestroy(); }
+    @Override protected void onDestroy() {
+        uiHandler.removeCallbacks(healthPoll);
+        scene.lua().stop();
+        worker.shutdownNow();
+        super.onDestroy();
+    }
 
     @Override public void onBackPressed() {
+        if (scriptEditor != null && scriptEditor.getVisibility() == View.VISIBLE) {
+            Instance s = scriptEditor.currentScript();
+            scriptEditor.setVisibility(View.GONE);
+            if (s != null) refresh();
+            return;
+        }
         if (scene.playing) { stopPlay(); return; }
         if (!loading && loadError == null && scene.version != savedVersion) {
             new AlertDialog.Builder(this).setTitle("Save changes?").setMessage("This place has unsaved editor changes.")
@@ -190,37 +215,99 @@ public final class EngineActivity extends Activity {
         android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
         float density = metrics.density <= 0 ? 1 : metrics.density;
         int widthDp = (int) (metrics.widthPixels / density);
-        narrowScreen = widthDp < 700;
-        explorerWidth = narrowScreen ? Math.min(dp(210), (int) (metrics.widthPixels * 0.36f)) : dp(226);
-        propertiesWidth = narrowScreen ? Math.min(dp(230), (int) (metrics.widthPixels * 0.40f)) : dp(258);
+        narrowScreen = widthDp < 720;
+        explorerWidth = narrowScreen ? Math.min(dp(250), (int) (metrics.widthPixels * 0.42f)) : dp(232);
+        propertiesWidth = narrowScreen ? Math.min(dp(265), (int) (metrics.widthPixels * 0.46f)) : dp(264);
+
+        scene.setOutputListener(() -> runOnUiThread(this::rebuildOutput));
+        scene.setUiRefreshListener(() -> runOnUiThread(() -> { if (scene.playing) rebuildPlayGui(); }));
 
         LinearLayout root = col();
         root.setBackgroundColor(PANEL);
-        root.addView(buildTopBar(), lp(-1, dp(48)));
-        LinearLayout body = row();
-        root.addView(body, lp(-1, 0, 1));
+        root.addView(buildTopBar(), lp(-1, dp(46)));
+        root.addView(line(), lp(-1, dp(1)));
+
         explorerPanel = buildExplorer();
         propertiesPanel = buildProperties();
-        body.addView(explorerPanel, lp(explorerWidth, -1));
-        explorerSeparator = line();
-        body.addView(explorerSeparator, lp(dp(1), -1));
-        viewportBox = buildViewport();
-        body.addView(viewportBox, lp(0, -1, 1));
-        propertiesSeparator = line();
-        body.addView(propertiesSeparator, lp(dp(1), -1));
-        body.addView(propertiesPanel, lp(propertiesWidth, -1));
+        toolboxPanel = buildToolbox();
+        outputPanel = buildOutputPanel();
+        scriptEditor = new ScriptEditorView(this, new ScriptEditorView.Listener() {
+            @Override public void onSaveScript(Instance script, String source) {
+                script.props.put("Source", source);
+                script.tags.put("Source", "ProtectedString");
+                scene.markDirty();
+                Toast.makeText(EngineActivity.this, "Saved " + script.name, Toast.LENGTH_SHORT).show();
+            }
+            @Override public void onRunScript(Instance script, String source) {
+                if (outputPanel != null) outputPanel.setVisibility(View.VISIBLE);
+                scene.runCommand(source);
+            }
+            @Override public void onCloseEditor() {
+                scriptEditor.setVisibility(View.GONE);
+                refresh();
+            }
+        });
+        scriptEditor.setVisibility(View.GONE);
 
-        boolean showExplorer = !narrowScreen;
-        explorerPanel.setVisibility(showExplorer ? View.VISIBLE : View.GONE);
-        propertiesPanel.setVisibility(showExplorer ? View.VISIBLE : View.GONE);
+        viewportBox = buildViewport();
+
+        if (narrowScreen) {
+            FrameLayout workspaceFrame = new FrameLayout(this);
+            workspaceFrame.addView(viewportBox, new FrameLayout.LayoutParams(-1, -1));
+
+            explorerPanel.setElevation(dp(8));
+            propertiesPanel.setElevation(dp(8));
+            toolboxPanel.setElevation(dp(8));
+            outputPanel.setElevation(dp(8));
+            scriptEditor.setElevation(dp(12));
+
+            workspaceFrame.addView(explorerPanel, new FrameLayout.LayoutParams(explorerWidth, -1, Gravity.LEFT));
+            workspaceFrame.addView(toolboxPanel, new FrameLayout.LayoutParams(explorerWidth, -1, Gravity.LEFT));
+            workspaceFrame.addView(propertiesPanel, new FrameLayout.LayoutParams(propertiesWidth, -1, Gravity.RIGHT));
+            workspaceFrame.addView(outputPanel, new FrameLayout.LayoutParams(-1, dp(175), Gravity.BOTTOM));
+            workspaceFrame.addView(scriptEditor, new FrameLayout.LayoutParams(-1, -1));
+
+            explorerPanel.setVisibility(View.GONE);
+            propertiesPanel.setVisibility(View.GONE);
+            toolboxPanel.setVisibility(View.GONE);
+            outputPanel.setVisibility(View.GONE);
+            root.addView(workspaceFrame, lp(-1, 0, 1));
+        } else {
+            LinearLayout body = row();
+            root.addView(body, lp(-1, 0, 1));
+            body.addView(explorerPanel, lp(explorerWidth, -1));
+            explorerSeparator = line();
+            body.addView(explorerSeparator, lp(dp(1), -1));
+
+            FrameLayout center = new FrameLayout(this);
+            center.addView(viewportBox, new FrameLayout.LayoutParams(-1, -1));
+            toolboxPanel.setElevation(dp(6));
+            outputPanel.setElevation(dp(6));
+            scriptEditor.setElevation(dp(10));
+            center.addView(toolboxPanel, new FrameLayout.LayoutParams(dp(260), -1, Gravity.LEFT));
+            center.addView(outputPanel, new FrameLayout.LayoutParams(-1, dp(185), Gravity.BOTTOM));
+            center.addView(scriptEditor, new FrameLayout.LayoutParams(-1, -1));
+            toolboxPanel.setVisibility(View.GONE);
+            outputPanel.setVisibility(View.GONE);
+            body.addView(center, lp(0, -1, 1));
+
+            propertiesSeparator = line();
+            body.addView(propertiesSeparator, lp(dp(1), -1));
+            body.addView(propertiesPanel, lp(propertiesWidth, -1));
+        }
         return root;
     }
 
-    /** Explorer/Properties are toggles so the viewport can take the whole screen on a phone. */
     private void togglePanel(View panel, View separator) {
+        if (panel == null) return;
         boolean show = panel.getVisibility() != View.VISIBLE;
+        if (show && narrowScreen) {
+            if (panel == explorerPanel && toolboxPanel != null) toolboxPanel.setVisibility(View.GONE);
+            if (panel == toolboxPanel && explorerPanel != null) explorerPanel.setVisibility(View.GONE);
+        }
         panel.setVisibility(show ? View.VISIBLE : View.GONE);
         if (separator != null) separator.setVisibility(show ? View.VISIBLE : View.GONE);
+        refreshViewportTools();
     }
 
     private View buildTopBar() {
@@ -242,22 +329,22 @@ public final class EngineActivity extends Activity {
         names.addView(subtitle);
         bar.addView(names, lp(0, -2, 1));
         // Panels are toggles: on a phone the viewport gets the whole width until you ask for one.
-        bar.addView(iconButton("layers", "Explorer panel", () -> togglePanel(explorerPanel, explorerSeparator)), lp(button, button));
-        bar.addView(iconButton("list", "Properties panel", () -> togglePanel(propertiesPanel, propertiesSeparator)), lp(button, button));
-        if (!narrowScreen) {
-            bar.addView(iconButton("undo", "Undo", this::undo), lp(button, button));
-            bar.addView(iconButton("redo", "Redo", this::redo), lp(button, button));
-        }
-        LinearLayout playButton = row();
-        playButton.setGravity(Gravity.CENTER_VERTICAL);
-        playButton.setPadding(dp(narrowScreen ? 8 : 12), 0, dp(narrowScreen ? 8 : 12), 0);
-        playButton.setBackground(shape(SOFT, 8));
-        playLabel = text("Play", 12, true, ACCENT);
-        StudioIcon playIcon = new StudioIcon(this, "play", ACCENT);
-        playButton.addView(playIcon, lp(dp(15), dp(15)));
-        if (!narrowScreen) playButton.addView(playLabel, margin(8, 0, -2, -2));
-        playButton.setOnClickListener(v -> { if (scene.playing) stopPlay(); else startPlay(); });
-        bar.addView(playButton, lp(-2, dp(34)));
+        bar.addView(iconButton("undo", "Undo", this::undo), lp(dp(36), button));
+        bar.addView(iconButton("redo", "Redo", this::redo), lp(dp(36), button));
+        bar.addView(iconButton("layers", "Explorer", () -> togglePanel(explorerPanel, explorerSeparator)), lp(dp(38), button));
+        bar.addView(iconButton("list", "Properties", () -> togglePanel(propertiesPanel, propertiesSeparator)), lp(dp(38), button));
+        bar.addView(iconButton("toolbox", "Toolbox", () -> togglePanel(toolboxPanel, null)), lp(dp(38), button));
+        bar.addView(iconButton("terminal", "Output", () -> togglePanel(outputPanel, null)), lp(dp(38), button));
+        playButtonContainer = row();
+        playButtonContainer.setGravity(Gravity.CENTER_VERTICAL);
+        playButtonContainer.setPadding(dp(10), 0, dp(12), 0);
+        playButtonContainer.setBackground(shape(0xff1e8e5a, 9));
+        playLabel = text("Play", 11.5f, true, 0xffffffff);
+        playIconView = new StudioIcon(this, "play", 0xffffffff);
+        playButtonContainer.addView(playIconView, lp(dp(14), dp(14)));
+        playButtonContainer.addView(playLabel, margin(dp(6), 0, -2, -2));
+        playButtonContainer.setOnClickListener(v -> { if (scene.playing) stopPlay(); else startPlay(); });
+        bar.addView(playButtonContainer, margin(dp(4), 0, -2, dp(32)));
         bar.addView(iconButton("save", "Save place", () -> save(true)), lp(button, button));
         bar.addView(iconButton("more", "More actions", () -> moreMenu(bar)), lp(button, button));
         return bar;
@@ -345,6 +432,14 @@ public final class EngineActivity extends Activity {
 
         viewportLayer.addView(buildFlyControls(), new FrameLayout.LayoutParams(-1, -1));
 
+        flySpeedPill = text("Fly x1", 11, true, 0xffffffff);
+        flySpeedPill.setPadding(dp(11), dp(6), dp(11), dp(6));
+        flySpeedPill.setBackground(shape(0xcc23272f, 16));
+        flySpeedPill.setOnClickListener(v -> flySpeedDialog());
+        FrameLayout.LayoutParams speedLp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.RIGHT);
+        speedLp.setMargins(0, 0, dp(14), dp(16));
+        viewportLayer.addView(flySpeedPill, speedLp);
+
         playControls = buildPlayControls();
         playControls.setVisibility(View.GONE);
         viewportLayer.addView(playControls, new FrameLayout.LayoutParams(-1, -1));
@@ -394,16 +489,222 @@ public final class EngineActivity extends Activity {
 
     private View buildPlayControls() {
         FrameLayout layer = new FrameLayout(this);
+        LinearLayout hudRow = row();
+        hudRow.setGravity(Gravity.CENTER_VERTICAL);
+        hudRow.setPadding(dp(10), dp(6), dp(10), dp(6));
+        hudRow.setBackground(shape(0xbb181c24, 12));
+        healthLabel = text("HP 100/100", 11, true, 0xff7ce6a5);
+        hudRow.addView(healthLabel);
+        camModePill = text("3P", 10.5f, true, 0xffffffff);
+        camModePill.setPadding(dp(8), dp(3), dp(8), dp(3));
+        camModePill.setBackground(shape(0xff2d56e8, 8));
+        camModePill.setOnClickListener(v -> {
+            scene.firstPerson = !scene.firstPerson;
+            scene.camDist = scene.firstPerson ? 1.0 : 16.0;
+            camModePill.setText(scene.firstPerson ? "1P" : "3P");
+        });
+        hudRow.addView(camModePill, margin(dp(10), 0, -2, -2));
+        TextView respawnBtn = text("Respawn", 10.5f, true, 0xffe2e8f5);
+        respawnBtn.setPadding(dp(8), dp(3), dp(8), dp(3));
+        respawnBtn.setBackground(shape(0xff343c4d, 8));
+        respawnBtn.setOnClickListener(v -> scene.respawnCharacter());
+        hudRow.addView(respawnBtn, margin(dp(6), 0, -2, -2));
+        FrameLayout.LayoutParams hudLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
+        hudLp.setMargins(dp(10), dp(10), 0, 0);
+        layer.addView(hudRow, hudLp);
+
+        guiOverlay = col();
+        guiOverlay.setGravity(Gravity.CENTER_HORIZONTAL);
+        FrameLayout.LayoutParams guiLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
+        guiLp.setMargins(0, dp(10), dp(12), 0);
+        layer.addView(guiOverlay, guiLp);
+
         jumpButton = roundButton("JUMP", () -> { scene.jumpQueued = true; viewport.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); });
         FrameLayout.LayoutParams jump = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.RIGHT);
         jump.setMargins(0, 0, dp(20), dp(20));
         layer.addView(jumpButton, jump);
-        TextView hint = text("Drag to look around", 11, false, 0xffffffff);
+        TextView hint = text("Drag to look · Pinch to zoom 1P/3P", 10.5f, false, 0xffffffff);
         hint.setShadowLayer(4, 0, 1, 0x99000000);
         FrameLayout.LayoutParams hintParams = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         hintParams.setMargins(0, 0, 0, dp(12));
         layer.addView(hint, hintParams);
         return layer;
+    }
+
+    private void flySpeedDialog() {
+        final double[] mults = {0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0};
+        final String[] labels = {"x0.25 (Fine)", "x0.5 (Slow)", "x1 (Normal)", "x2 (Fast)", "x4 (Very fast)", "x8 (Map tour)", "x16 (Hyper)"};
+        new AlertDialog.Builder(this).setTitle("Camera fly speed")
+                .setItems(labels, (d, which) -> {
+                    scene.flySpeedMultiplier = mults[which];
+                    if (flySpeedPill != null) flySpeedPill.setText("Fly x" + PlaceWriter.num(mults[which]));
+                }).show();
+    }
+
+    private void rebuildPlayGui() {
+        if (guiOverlay == null) return;
+        guiOverlay.removeAllViews();
+        if (!scene.playing || scene.root == null) return;
+        Instance starterGui = scene.root.findFirst("StarterGui");
+        if (starterGui == null) return;
+        for (Instance child : starterGui.children) {
+            if (!"ScreenGui".equals(child.className) || !child.getBool("Enabled", true)) continue;
+            renderGuiChildren(child);
+        }
+    }
+
+    private void renderGuiChildren(Instance parent) {
+        for (Instance el : parent.children) {
+            if (!el.getBool("Visible", true)) continue;
+            if ("TextButton".equals(el.className) || "TextLabel".equals(el.className)) {
+                int bg = colourOf(el, "BackgroundColor3", "TextButton".equals(el.className) ? 0x2D56E8 : 0x1D222E);
+                int fg = colourOf(el, "TextColor3", 0xFFFFFF);
+                TextView tv = text(el.getString("Text", el.name), 12, true, 0xFF000000 | fg);
+                tv.setPadding(dp(14), dp(8), dp(14), dp(8));
+                tv.setBackground(shape(0xEE000000 | bg, 10));
+                if ("TextButton".equals(el.className)) {
+                    tv.setOnClickListener(v -> scene.lua().fireGuiClick(el));
+                }
+                guiOverlay.addView(tv, margin(0, dp(6), -2, -2));
+            }
+            if (!el.children.isEmpty()) renderGuiChildren(el);
+        }
+    }
+
+    private View buildToolbox() {
+        LinearLayout panel = col();
+        panel.setBackgroundColor(PANEL);
+        LinearLayout head = row();
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(10), 0, dp(6), 0);
+        head.addView(new StudioIcon(this, "toolbox", ACCENT), lp(dp(14), dp(14)));
+        head.addView(text("TOOLBOX", 10, true, MUTED), margin(dp(6), 0, 0, -2, 1));
+        head.addView(iconButton("close", "Close Toolbox", () -> togglePanel(toolboxPanel, null)), lp(dp(30), dp(30)));
+        panel.addView(head, lp(-1, dp(32)));
+        panel.addView(line(), lp(-1, dp(1)));
+
+        HorizontalScrollView catsScroll = new HorizontalScrollView(this);
+        catsScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout catsRow = row();
+        catsRow.setPadding(dp(8), dp(6), dp(8), dp(6));
+        String[] cats = {"All", "Obby", "Mechanics", "Models", "UI"};
+        for (final String cat : cats) {
+            TextView chip = text(cat, 10.5f, true, toolboxCategory.equals(cat) ? 0xffffffff : TEXT);
+            chip.setPadding(dp(10), dp(4), dp(10), dp(4));
+            chip.setBackground(shape(toolboxCategory.equals(cat) ? ACCENT : CANVAS, 12));
+            chip.setOnClickListener(v -> { toolboxCategory = cat; rebuildToolboxList(); });
+            catsRow.addView(chip, margin(dp(4), 0, -2, -2));
+        }
+        catsScroll.addView(catsRow);
+        panel.addView(catsScroll, lp(-1, -2));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        toolboxList = col();
+        toolboxList.setPadding(dp(8), dp(2), dp(8), dp(12));
+        scroll.addView(toolboxList, new ScrollView.LayoutParams(-1, -2));
+        panel.addView(scroll, lp(-1, 0, 1));
+        rebuildToolboxList();
+        return panel;
+    }
+
+    private void rebuildToolboxList() {
+        if (toolboxList == null) return;
+        toolboxList.removeAllViews();
+        for (final StudioPrefabs.Prefab p : StudioPrefabs.ALL) {
+            if (!"All".equals(toolboxCategory) && !p.category.equals(toolboxCategory)) continue;
+            LinearLayout card = col();
+            card.setPadding(dp(10), dp(8), dp(10), dp(8));
+            card.setBackground(shape(PANEL2, 10));
+            LinearLayout top = row();
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            top.addView(text(p.title, 12, true, TEXT), lp(0, -2, 1));
+            top.addView(badge(p.category));
+            card.addView(top, lp(-1, -2));
+            TextView desc = text(p.description, 10, false, MUTED);
+            desc.setPadding(0, dp(3), 0, 0);
+            card.addView(desc, lp(-1, -2));
+            card.setOnClickListener(v -> {
+                Instance spawned = StudioPrefabs.spawn(scene, p.id);
+                if (spawned != null) {
+                    if (spawned.isRenderable()) scene.focus(spawned);
+                    else if (!spawned.children.isEmpty() && spawned.children.get(0).isRenderable()) scene.focus(spawned.children.get(0));
+                    expanded.add(spawned.parent == null ? scene.workspace : spawned.parent);
+                    expanded.add(spawned);
+                    afterEdit();
+                    Toast.makeText(this, "Inserted " + p.title, Toast.LENGTH_SHORT).show();
+                    if (narrowScreen) togglePanel(toolboxPanel, null);
+                }
+            });
+            LinearLayout.LayoutParams lpCard = lp(-1, -2);
+            lpCard.bottomMargin = dp(6);
+            toolboxList.addView(card, lpCard);
+        }
+    }
+
+    private View buildOutputPanel() {
+        LinearLayout panel = col();
+        panel.setBackgroundColor(dark ? 0xf2141821 : 0xf5f4f6fa);
+        panel.addView(line(), lp(-1, dp(1)));
+        LinearLayout head = row();
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(10), 0, dp(6), 0);
+        head.addView(new StudioIcon(this, "terminal", ACCENT), lp(dp(14), dp(14)));
+        head.addView(text("OUTPUT & COMMAND BAR", 10, true, MUTED), margin(dp(6), 0, 0, -2, 1));
+        head.addView(smallButton("Clear", () -> scene.clearOutput()), margin(dp(4), 0, -2, dp(24)));
+        head.addView(iconButton("close", "Close Output", () -> togglePanel(outputPanel, null)), lp(dp(30), dp(30)));
+        panel.addView(head, lp(-1, dp(30)));
+        panel.addView(line(), lp(-1, dp(1)));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        outputList = col();
+        outputList.setPadding(dp(10), dp(4), dp(10), dp(4));
+        scroll.addView(outputList, new ScrollView.LayoutParams(-1, -2));
+        panel.addView(scroll, lp(-1, 0, 1));
+
+        LinearLayout cmdRow = row();
+        cmdRow.setGravity(Gravity.CENTER_VERTICAL);
+        cmdRow.setPadding(dp(8), dp(4), dp(8), dp(4));
+        cmdRow.setBackgroundColor(PANEL2);
+        commandInput = input("");
+        commandInput.setHint("> Run Luau (e.g. print(workspace.Name))");
+        commandInput.setTypeface(android.graphics.Typeface.MONOSPACE);
+        cmdRow.addView(commandInput, lp(0, dp(30), 1));
+        TextView runBtn = button("Run", () -> {
+            String code = commandInput.getText().toString().trim();
+            if (!code.isEmpty()) {
+                commandInput.setText("");
+                scene.runCommand(code);
+            }
+        });
+        cmdRow.addView(runBtn, margin(dp(6), 0, -2, dp(30)));
+        panel.addView(cmdRow, lp(-1, dp(38)));
+        rebuildOutput();
+        return panel;
+    }
+
+    private void rebuildOutput() {
+        if (outputList == null) return;
+        outputList.removeAllViews();
+        ArrayList<EngineScene.OutputEntry> copy;
+        synchronized (scene.outputLog) { copy = new ArrayList<>(scene.outputLog); }
+        if (copy.isEmpty()) {
+            outputList.addView(hintText("No output yet. Press Play or run a Luau command below."));
+            return;
+        }
+        int start = Math.max(0, copy.size() - 60);
+        for (int i = start; i < copy.size(); i++) {
+            EngineScene.OutputEntry e = copy.get(i);
+            int color = TEXT;
+            if ("error".equals(e.level)) color = 0xFFFF6B6B;
+            else if ("warn".equals(e.level)) color = 0xFFFFB74D;
+            else if ("info".equals(e.level)) color = ACCENT;
+            TextView tv = text(e.time + "  " + e.message, 10.5f, false, color);
+            tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+            tv.setPadding(0, dp(1), 0, dp(1));
+            outputList.addView(tv);
+        }
     }
 
     private View buildProperties() {
@@ -558,7 +859,12 @@ public final class EngineActivity extends Activity {
         cls.setEllipsize(TextUtils.TruncateAt.END);
         words.addView(cls);
         row.addView(words, margin(dp(7), 0, 0, -2, 1));
-        row.setOnClickListener(v -> { scene.selection = node; refresh(); });
+        row.setOnClickListener(v -> {
+            boolean wasSelected = scene.selection == node;
+            scene.selection = node;
+            refresh();
+            if (wasSelected && isScript(node)) openScriptEditor(node);
+        });
         row.setOnLongClickListener(v -> { nodeMenu(v, node); return true; });
         LinearLayout.LayoutParams params = lp(-1, dp(30));
         row.setLayoutParams(params);
@@ -583,6 +889,7 @@ public final class EngineActivity extends Activity {
 
     private void nodeMenu(View anchor, Instance node) {
         PopupMenu menu = new PopupMenu(this, anchor);
+        if (isScript(node)) menu.getMenu().add("Edit Script");
         menu.getMenu().add("Rename");
         menu.getMenu().add("Duplicate");
         menu.getMenu().add("Group in Folder");
@@ -591,6 +898,7 @@ public final class EngineActivity extends Activity {
         if (node.isRenderable()) { menu.getMenu().add("Anchor / Unanchor"); menu.getMenu().add("CanCollide on/off"); }
         menu.setOnMenuItemClickListener(item -> {
             String label = item.getTitle().toString();
+            if (label.equals("Edit Script")) { openScriptEditor(node); return true; }
             if (label.equals("Rename")) { renameDialog(node); return true; }
             if (label.equals("Duplicate")) { scene.selection = node; scene.duplicateSelection(); afterEdit(); return true; }
             if (label.equals("Group in Folder")) { groupInFolder(node); return true; }
@@ -706,6 +1014,8 @@ public final class EngineActivity extends Activity {
             case "Decal": case "Texture": textureRows(node); break;
             case "SurfaceAppearance": surfaceAppearanceRows(node); break;
             case "MeshPart": meshRows(node); break;
+            case "Script": case "LocalScript": case "ModuleScript": scriptRows(node); break;
+            case "ScreenGui": case "Frame": case "TextLabel": case "TextButton": guiRows(node); break;
             default: break;
         }
         if (node.isRenderable()) basePartRows(node);
@@ -881,6 +1191,42 @@ public final class EngineActivity extends Activity {
     }
 
     private static final String[] ALPHA_MODES = {"Overlay", "Transparency", "TintMask", "Opaque"};
+
+    private static boolean isScript(Instance node) {
+        return node != null && ("Script".equals(node.className) || "LocalScript".equals(node.className) || "ModuleScript".equals(node.className));
+    }
+
+    private void openScriptEditor(Instance node) {
+        if (scriptEditor == null || !isScript(node)) return;
+        if (narrowScreen) {
+            if (explorerPanel != null) explorerPanel.setVisibility(View.GONE);
+            if (propertiesPanel != null) propertiesPanel.setVisibility(View.GONE);
+            if (toolboxPanel != null) toolboxPanel.setVisibility(View.GONE);
+        }
+        scriptEditor.open(node);
+    }
+
+    private void scriptRows(Instance node) {
+        propertyList.addView(sectionLabel("Luau Script"));
+        propertyList.addView(button("Open Script Editor", () -> openScriptEditor(node)), margin(0, dp(4), -1, dp(36)));
+        propertyList.addView(checkRow("Disabled", node.getBool("Disabled", false), checked -> { scene.setProperty(node, "Disabled", checked); afterEdit(); }));
+        String srcText = node.getString("Source", "");
+        propertyList.addView(readonlyRow("Length", srcText.length() + " chars"));
+    }
+
+    private void guiRows(Instance node) {
+        propertyList.addView(sectionLabel("UI Properties"));
+        if ("ScreenGui".equals(node.className)) {
+            propertyList.addView(checkRow("Enabled", node.getBool("Enabled", true), checked -> { scene.setProperty(node, "Enabled", checked); afterEdit(); }));
+        } else {
+            propertyList.addView(checkRow("Visible", node.getBool("Visible", true), checked -> { scene.setProperty(node, "Visible", checked); afterEdit(); }));
+            if ("TextLabel".equals(node.className) || "TextButton".equals(node.className)) {
+                propertyList.addView(textRow("Text", node.getString("Text", node.name), value -> { scene.setProperty(node, "Text", value); afterEdit(); }));
+                propertyList.addView(colorRow("TextColor3", colourOf(node, "TextColor3", 0xFFFFFF), value -> { scene.setProperty(node, "TextColor3", rgb(value)); afterEdit(); }));
+            }
+            propertyList.addView(colorRow("BackgroundColor3", colourOf(node, "BackgroundColor3", 0x2D56E8), value -> { scene.setProperty(node, "BackgroundColor3", rgb(value)); afterEdit(); }));
+        }
+    }
 
     private void meshRows(Instance node) {
         propertyList.addView(sectionLabel("MeshPart"));
@@ -1283,23 +1629,50 @@ public final class EngineActivity extends Activity {
 
     // ------------------------------------------------------------------ play
     private void startPlay() {
+        if (scriptEditor != null) scriptEditor.setVisibility(View.GONE);
+        if (narrowScreen) {
+            if (explorerPanel != null) explorerPanel.setVisibility(View.GONE);
+            if (propertiesPanel != null) propertiesPanel.setVisibility(View.GONE);
+            if (toolboxPanel != null) toolboxPanel.setVisibility(View.GONE);
+        }
+        if (toolStrip != null) ((View) toolStrip.getParent()).setVisibility(View.GONE);
+        if (flySpeedPill != null) flySpeedPill.setVisibility(View.GONE);
         scene.startPlay();
         playControls.setVisibility(View.VISIBLE);
         if (liftPad != null) liftPad.setVisibility(View.GONE);
         flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Stop");
-        subtitle.setText("Playing locally — drag to look, joystick to move");
+        if (playButtonContainer != null) playButtonContainer.setBackground(shape(0xffd13b3b, 9));
+        if (playIconView != null) {
+            playButtonContainer.removeView(playIconView);
+            playIconView = new StudioIcon(this, "stop", 0xffffffff);
+            playButtonContainer.addView(playIconView, 0, lp(dp(14), dp(14)));
+        }
+        subtitle.setText("Playing locally — scripts & StarterGui active");
         scene.refreshCache();
+        rebuildPlayGui();
+        uiHandler.removeCallbacks(healthPoll);
+        uiHandler.post(healthPoll);
     }
 
     private void stopPlay() {
+        uiHandler.removeCallbacks(healthPoll);
         scene.stopPlay();
         playControls.setVisibility(View.GONE);
+        if (guiOverlay != null) guiOverlay.removeAllViews();
+        if (toolStrip != null) ((View) toolStrip.getParent()).setVisibility(View.VISIBLE);
+        if (flySpeedPill != null) flySpeedPill.setVisibility(View.VISIBLE);
         if (liftPad != null) liftPad.setVisibility(View.VISIBLE);
         flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Play");
+        if (playButtonContainer != null) playButtonContainer.setBackground(shape(0xff1e8e5a, 9));
+        if (playIconView != null) {
+            playButtonContainer.removeView(playIconView);
+            playIconView = new StudioIcon(this, "play", 0xffffffff);
+            playButtonContainer.addView(playIconView, 0, lp(dp(14), dp(14)));
+        }
         subtitle.setText("Edit mode — drag to look, joystick to fly, handles to transform");
-        scene.refreshCache();
+        refresh();
     }
 
     // ------------------------------------------------------------------ persistence
@@ -1345,7 +1718,8 @@ public final class EngineActivity extends Activity {
                         "Grid snapping is in the tool strip.\n\n" +
                         "Not rendered yet: shadow maps (GlobalShadows/ShadowSoftness are read but no shadow map is produced), DepthOfField, terrain, " +
                         "particles, animations, and SurfaceAppearance maps other than ColorMap.\n\n" +
-                        "Scripts do not run. Unions/Meshes use bounding boxes, and rotated parts collide as axis-aligned boxes.\n\n" +
+                        "Shapes & Rendering: Blocks, Balls, Cylinders, and Wedges render with dedicated 3D meshes and 6-plane frustum culling.\n\n" +
+                        "Luau Scripting & Playtest: Embedded Luau interpreter executes Script/LocalScript/ModuleScript with Touched, Heartbeat, TweenService, Players.LocalPlayer, StarterGui buttons, Output console, and Command Bar. Scene changes during Play automatically restore on Stop.\n\n" +
                         "Saving writes the Roblox XML data model back to this place file; publish from the project page to sync with Roblox."
                         + (textureNote.isEmpty() ? "" : "\n\n" + textureNote)
                         + (viewport == null || viewport.postNote().isEmpty() ? "" : "\n\n" + viewport.postNote()))

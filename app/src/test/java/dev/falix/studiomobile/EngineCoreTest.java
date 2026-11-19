@@ -769,4 +769,46 @@ public class EngineCoreTest {
             assertNotNull(light.summary());
         } finally { file.delete(); }
     }
+
+    @Test public void placeWriterSerializesScriptSourceAsProtectedString() throws Exception {
+        Instance root = new Instance("DataModel", "Game");
+        Instance sss = new Instance("ServerScriptService", "ServerScriptService");
+        Instance script = new Instance("Script", "HelloScript");
+        script.props.put("Source", "print(\"hi\")");
+        sss.add(script);
+        root.add(sss);
+        String xml = PlaceWriter.generate(root);
+        assertTrue(xml.contains("<ProtectedString name=\"Source\">print(&quot;hi&quot;)</ProtectedString>"));
+    }
+
+    @Test public void luaRuntimeExecutesMathAndMutatesScenePart() throws Exception {
+        Instance root = EngineScene.parseFragment(PlaceTemplate.generate("LuaTest", "baseplate", 196.2, false));
+        EngineScene scene = new EngineScene();
+        scene.setRoot(root, "LuaTest");
+        final StringBuilder logged = new StringBuilder();
+        LuaRuntime rt = new LuaRuntime(scene, (lvl, msg) -> logged.append(lvl).append(":").append(msg), null);
+        Instance s = new Instance("Script", "TestScript");
+        scene.workspace.add(s);
+        rt.executeScript(s,
+                "local p = Instance.new(\"Part\", workspace)\n"
+                + "p.Name = \"LuaPart\"\n"
+                + "p.Position = Vector3.new(10, 20, 30)\n"
+                + "print(\"sum=\" .. tostring(2 + 3 * 4))\n");
+        Instance created = scene.workspace.childNamed("LuaPart");
+        assertNotNull("LuaRuntime should create Part in Workspace", created);
+        assertEquals(10.0, created.cframe()[0], 1e-6);
+        assertEquals(20.0, created.cframe()[1], 1e-6);
+        assertEquals(30.0, created.cframe()[2], 1e-6);
+        assertTrue("print output must be logged", logged.toString().contains("print:sum=14"));
+    }
+
+    @Test public void studioPrefabsSpawnsScriptedKillBrick() throws Exception {
+        Instance root = EngineScene.parseFragment(PlaceTemplate.generate("PrefabTest", "baseplate", 196.2, false));
+        EngineScene scene = new EngineScene();
+        scene.setRoot(root, "PrefabTest");
+        Instance spawned = StudioPrefabs.spawn(scene, "kill_brick");
+        assertNotNull(spawned);
+        assertEquals("KillBrick", spawned.name);
+        assertNotNull("KillBrick must include a Luau Script", spawned.findFirst("Script"));
+    }
 }
