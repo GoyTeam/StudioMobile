@@ -33,15 +33,26 @@ final class AvatarMesh {
         { 0.50f, 1.00f, 0.00f}  // 10 R_LOWER_LEG
     };
 
-    static int classifyTriangle(float cx, float cy, float cz) {
-        if (cy >= 3.92f) return PART_HEAD;
+    static int classifyIsland(float cx, float cy, float cz, float minY, float maxY) {
+        // Keep entire welded shells (hood, backpack, arms, legs, torso) unbroken
+        if (cy >= 3.92f || minY >= 3.75f) return PART_HEAD;
         if (cy >= 1.96f) {
-            if (cx < -1.03f) return cy >= 2.95f ? PART_L_UPPER_ARM : PART_L_LOWER_ARM;
-            if (cx >  1.03f) return cy >= 2.95f ? PART_R_UPPER_ARM : PART_R_LOWER_ARM;
+            if (cx < -1.02f) return cy >= 2.95f ? PART_L_UPPER_ARM : PART_L_LOWER_ARM;
+            if (cx >  1.02f) return cy >= 2.95f ? PART_R_UPPER_ARM : PART_R_LOWER_ARM;
             return cy >= 2.55f ? PART_UPPER_TORSO : PART_LOWER_TORSO;
         }
         if (cx <= 0.0f) return cy >= 1.00f ? PART_L_UPPER_LEG : PART_L_LOWER_LEG;
         return cy >= 1.00f ? PART_R_UPPER_LEG : PART_R_LOWER_LEG;
+    }
+
+    private static int ufFind(int[] p, int x) {
+        while (p[x] != x) { p[x] = p[p[x]]; x = p[x]; }
+        return x;
+    }
+
+    private static void ufUnion(int[] p, int a, int b) {
+        int ra = ufFind(p, a), rb = ufFind(p, b);
+        if (ra != rb) p[ra] = rb;
     }
 
     static final class SubMesh {
@@ -369,26 +380,62 @@ final class AvatarMesh {
                 }
                 if (cached != null) tex = cached;
             }
-            // Partition triangles into the 11 articulated Roblox body-part buckets
-            Bucket[] parts = new Bucket[PART_PIVOTS.length];
+            // Group welded mesh islands via Union-Find on quantized vertex positions so no limb/hood/backpack is ever torn across a seam
             int triCount = vc / 3;
+            float[] nx = new float[vc], ny = new float[vc], nz = new float[vc];
+            int[] parent = new int[triCount];
+            for (int t = 0; t < triCount; t++) parent[t] = t;
+            HashMap<Long, Integer> vertToTri = new HashMap<>(vc);
             for (int t = 0; t < triCount; t++) {
-                int i0 = t * 3, i1 = i0 + 1, i2 = i0 + 2;
-                float x0 = (b.pos.get(i0 * 3) - cx) * scale, y0 = (b.pos.get(i0 * 3 + 1) - minY) * scale, z0 = (b.pos.get(i0 * 3 + 2) - cz) * scale;
-                float x1 = (b.pos.get(i1 * 3) - cx) * scale, y1 = (b.pos.get(i1 * 3 + 1) - minY) * scale, z1 = (b.pos.get(i1 * 3 + 2) - cz) * scale;
-                float x2 = (b.pos.get(i2 * 3) - cx) * scale, y2 = (b.pos.get(i2 * 3 + 1) - minY) * scale, z2 = (b.pos.get(i2 * 3 + 2) - cz) * scale;
-                int pid = classifyTriangle((x0 + x1 + x2) / 3f, (y0 + y1 + y2) / 3f, (z0 + z1 + z2) / 3f);
+                for (int k = 0; k < 3; k++) {
+                    int vi = t * 3 + k;
+                    float vx = (b.pos.get(vi * 3) - cx) * scale;
+                    float vy = (b.pos.get(vi * 3 + 1) - minY) * scale;
+                    float vz = (b.pos.get(vi * 3 + 2) - cz) * scale;
+                    nx[vi] = vx; ny[vi] = vy; nz[vi] = vz;
+                    long qx = Math.round(vx * 180f) + 100000L;
+                    long qy = Math.round(vy * 180f) + 100000L;
+                    long qz = Math.round(vz * 180f) + 100000L;
+                    long key = (qx << 40) ^ (qy << 20) ^ qz;
+                    Integer prev = vertToTri.put(key, t);
+                    if (prev != null) ufUnion(parent, t, prev);
+                }
+            }
+            // Compute centroid & vertical bounds per connected island
+            HashMap<Integer, float[]> islandStats = new HashMap<>();
+            for (int t = 0; t < triCount; t++) {
+                int r = ufFind(parent, t);
+                float[] st = islandStats.get(r);
+                if (st == null) {
+                    st = new float[]{0f, 0f, 0f, 0f, Float.MAX_VALUE, -Float.MAX_VALUE};
+                    islandStats.put(r, st);
+                }
+                for (int k = 0; k < 3; k++) {
+                    int vi = t * 3 + k;
+                    st[0] += nx[vi]; st[1] += ny[vi]; st[2] += nz[vi]; st[3] += 1f;
+                    if (ny[vi] < st[4]) st[4] = ny[vi];
+                    if (ny[vi] > st[5]) st[5] = ny[vi];
+                }
+            }
+            HashMap<Integer, Integer> islandPart = new HashMap<>();
+            for (Map.Entry<Integer, float[]> ie : islandStats.entrySet()) {
+                float[] st = ie.getValue();
+                float inv = 1f / Math.max(1f, st[3]);
+                islandPart.put(ie.getKey(), classifyIsland(st[0] * inv, st[1] * inv, st[2] * inv, st[4], st[5]));
+            }
+            Bucket[] parts = new Bucket[PART_PIVOTS.length];
+            for (int t = 0; t < triCount; t++) {
+                int pid = islandPart.get(ufFind(parent, t));
                 if (parts[pid] == null) parts[pid] = new Bucket();
                 Bucket pb = parts[pid];
-                int[] idxs = {i0, i1, i2};
-                float[][] xyz = {{x0, y0, z0}, {x1, y1, z1}, {x2, y2, z2}};
                 for (int k = 0; k < 3; k++) {
-                    pb.pos.add(xyz[k][0]); pb.pos.add(xyz[k][1]); pb.pos.add(xyz[k][2]);
-                    pb.norm.add(b.norm.get(idxs[k] * 3));
-                    pb.norm.add(b.norm.get(idxs[k] * 3 + 1));
-                    pb.norm.add(b.norm.get(idxs[k] * 3 + 2));
-                    pb.uv.add(b.uv.get(idxs[k] * 2));
-                    pb.uv.add(b.uv.get(idxs[k] * 2 + 1));
+                    int vi = t * 3 + k;
+                    pb.pos.add(nx[vi]); pb.pos.add(ny[vi]); pb.pos.add(nz[vi]);
+                    pb.norm.add(b.norm.get(vi * 3));
+                    pb.norm.add(b.norm.get(vi * 3 + 1));
+                    pb.norm.add(b.norm.get(vi * 3 + 2));
+                    pb.uv.add(b.uv.get(vi * 2));
+                    pb.uv.add(b.uv.get(vi * 2 + 1));
                 }
             }
             for (int pid = 0; pid < parts.length; pid++) {

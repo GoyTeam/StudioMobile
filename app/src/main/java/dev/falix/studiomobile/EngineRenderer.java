@@ -55,14 +55,16 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private static final String FRAG =
             "precision highp float;\n" +
             "varying vec3 vNormal; varying vec3 vWorld; varying vec3 vLocal; varying float vFace; varying vec4 vShadowPos;\n" +
-            "uniform sampler2D uShadowMap; uniform float uHasShadow;\n" +
+            "uniform sampler2D uShadowMap; uniform float uHasShadow; uniform float uShadowSoftness; uniform float uTechLevel;\n" +
+            "uniform float uEnvDiffuse; uniform float uExposure; uniform vec3 uSkyTopCol; uniform vec3 uSkyHorCol;\n" +
+            "uniform vec3 uAtmoCol; uniform vec3 uAtmoDec; uniform vec4 uAtmoParams;\n" +
             "float unpackDepth(vec4 rgba){ return dot(rgba, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0)); }\n" +
             "float calcShadow(vec4 sp, float ndl){\n" +
             "  if (uHasShadow < 0.5) return 0.0;\n" +
             "  vec3 proj = sp.xyz / max(sp.w, 0.0001) * 0.5 + 0.5;\n" +
             "  if (proj.x < 0.01 || proj.x > 0.99 || proj.y < 0.01 || proj.y > 0.99 || proj.z > 0.99) return 0.0;\n" +
             "  float bias = max(0.0025 * (1.0 - ndl), 0.0012);\n" +
-            "  float s = 0.0; float texel = 1.0 / 1024.0;\n" +
+            "  float s = 0.0; float texel = (0.7 + uShadowSoftness * 1.9) / 1024.0;\n" +
             "  s += (proj.z - bias > unpackDepth(texture2D(uShadowMap, proj.xy + vec2(-texel, -texel)))) ? 1.0 : 0.0;\n" +
             "  s += (proj.z - bias > unpackDepth(texture2D(uShadowMap, proj.xy + vec2( texel, -texel)))) ? 1.0 : 0.0;\n" +
             "  s += (proj.z - bias > unpackDepth(texture2D(uShadowMap, proj.xy + vec2(-texel,  texel)))) ? 1.0 : 0.0;\n" +
@@ -123,11 +125,14 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  float assetMask = (uAssetFace < -0.5 || abs(uAssetFace - vFace) < 0.5) ? uHasAsset : 0.0;\n" +
             "  if (assetMask > 0.0) base = mix(base, texture2D(uAsset, faceUv * uAssetTiles).rgb, assetMask);\n" +
             "  float hemi = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);\n" +
-            "  vec3 skyAmbient = mix(uAmbient * 0.65 + vec3(0.08, 0.08, 0.09), uAmbient * 0.95 + vec3(0.14, 0.18, 0.24), hemi);\n" +
+            "  vec3 envIbl = mix(uSkyHorCol * 0.45, uSkyTopCol * 0.85 + uSkyHorCol * 0.25, hemi);\n" +
+            "  vec3 skyAmbient = mix(uAmbient * 0.72 + vec3(0.07, 0.07, 0.08), uAmbient * 0.98 + vec3(0.12, 0.15, 0.21), hemi) + envIbl * uEnvDiffuse * 0.48;\n" +
             "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
-            "  float shadow = calcShadow(vShadowPos, ndl);\n" +
-            "  vec3 light = skyAmbient + uSunColor * ndl * uSunGain * 0.95 * (1.0 - shadow * 0.74);\n" +
-            "  light += uShiftTop * ndl * 0.4 + uShiftBottom * (1.0 - ndl) * 0.3;\n" +
+            "  float shadow = uTechLevel >= 1.5 ? calcShadow(vShadowPos, ndl) : 0.0;\n" +
+            "  vec3 light = skyAmbient + uSunColor * ndl * uSunGain * 0.96 * (1.0 - shadow * 0.76);\n" +
+            "  light += uShiftTop * ndl * 0.42 + uShiftBottom * (1.0 - ndl) * 0.32;\n" +
+            "  vec3 view = normalize(uEye - vWorld);\n" +
+            "  vec3 localSpec = vec3(0.0);\n" +
             "  for (int i = 0; i < 4; i++) {\n" +
             "    float used = i < uLightCount ? 1.0 : 0.0;\n" +
             "    vec3 toLight = uLightPos[i] - vWorld;\n" +
@@ -142,23 +147,33 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "    }\n" +
             "    float ndlLocal = max(dot(n, l), 0.0);\n" +
             "    light += uLightColor[i] * ndlLocal * atten * cone * used;\n" +
-            "    if (uMetal > 0.5) {\n" +
-            "      vec3 hv = normalize(normalize(uEye - vWorld) + l);\n" +
-            "      light += uLightColor[i] * pow(max(dot(n, hv), 0.0), uShininess) * atten * cone * used * 0.5;\n" +
+            "    if (uTechLevel >= 2.5 || uMetal > 0.5) {\n" +
+            "      vec3 hvL = normalize(view + l);\n" +
+            "      float spL = pow(max(dot(n, hvL), 0.0), uShininess) * (1.0 - uRough * 0.55);\n" +
+            "      localSpec += uLightColor[i] * spL * atten * cone * used * (uTechLevel >= 2.5 ? 0.65 : 0.45);\n" +
             "    }\n" +
             "  }\n" +
-            "  vec3 view = normalize(uEye - vWorld);\n" +
             "  vec3 hv = normalize(view + uSunDir);\n" +
-            "  float spec = pow(max(dot(n, hv), 0.0), uShininess) * (1.0 - uRough * 0.5);\n" +
+            "  float spec = pow(max(dot(n, hv), 0.0), uShininess) * (1.0 - uRough * 0.5) * (1.0 - shadow * 0.85);\n" +
             "  vec3 specColour = mix(vec3(0.04), base, uMetal);\n" +
-            "  float fresnel = pow(1.0 - max(dot(n, view), 0.0), 4.0) * (1.0 - uRough * 0.7);\n" +
-            "  vec3 col = base * light * (1.0 - uMetal * 0.5) + specColour * (spec + fresnel * 0.18) * uSpecular * (uSunGain * 0.95 + 0.2)\n" +
+            "  float fresnel = pow(1.0 - max(dot(n, view), 0.0), 4.0) * (1.0 - uRough * 0.72);\n" +
+            "  float techSpecGain = uTechLevel >= 2.5 ? 1.25 : (uTechLevel >= 1.5 ? 0.95 : 0.55);\n" +
+            "  vec3 col = base * light * (1.0 - uMetal * 0.45) + specColour * ((spec + fresnel * 0.22 * envIbl) * uSpecular * techSpecGain * (uSunGain * 0.95 + 0.2) + localSpec)\n" +
             "           + base * uEmissive * 1.45;\n" +
+            "  col *= pow(2.0, uExposure);\n" +
             "  col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);\n" +
             "  float viewDist = length(uEye - vWorld);\n" +
             "  float fog = uFogEnabled * clamp((viewDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.001), 0.0, 1.0);\n" +
             "  float atmoHorizon = smoothstep(55.0, 260.0, viewDist) * 0.88;\n" +
-            "  vec3 finalCol = mix(col, mix(uFogColor, vec3(0.56, 0.63, 0.72), 0.72), max(fog, atmoHorizon));\n" +
+            "  vec3 hazeTarget = mix(uFogColor, vec3(0.56, 0.63, 0.72), 0.72);\n" +
+            "  if (uAtmoParams.x > 0.001) {\n" +
+            "    float sunAlign = clamp(dot(-view, uSunDir) * 0.5 + 0.5, 0.0, 1.0);\n" +
+            "    vec3 atmoTint = mix(uAtmoDec, uAtmoCol, pow(sunAlign, 1.2)) + uAtmoCol * pow(sunAlign, 6.0) * uAtmoParams.w * 0.45;\n" +
+            "    float atmoDist = clamp((viewDist - max(0.0, uAtmoParams.y) * 90.0) / max(45.0, 320.0 - uAtmoParams.x * 240.0), 0.0, 1.0);\n" +
+            "    atmoHorizon = max(atmoHorizon, atmoDist * clamp(uAtmoParams.x + uAtmoParams.z * 0.35, 0.0, 0.95));\n" +
+            "    hazeTarget = mix(hazeTarget, atmoTint, 0.85);\n" +
+            "  }\n" +
+            "  vec3 finalCol = mix(col, hazeTarget, max(fog, atmoHorizon));\n" +
             "  gl_FragColor = vec4(finalCol, uAlpha);\n" +
             "}";
 
@@ -285,6 +300,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private boolean shadowReady;
     private final float[] mLightView = new float[16], mLightProj = new float[16], mLightVp = new float[16], mLightMvp = new float[16];
     private int uAmbient, uSunDir, uSunColor, uSunGain, uShiftTop, uShiftBottom, uEye, uRough, uMetal, uEmissive, uShininess, uSpecular;
+    private int uShadowSoftness, uTechLevel, uEnvDiffuse, uExposure, uSkyTopCol, uSkyHorCol, uAtmoCol, uAtmoDec, uAtmoParams;
     private int uFogColor, uFogRange, uFogEnabled, uLightPos, uLightColor, uLightDir, uLightParams, uLightCount;
     private int uAtlas, uAtlasStep, uFaceTiles, uSpawnTile, uIsSpawn, uIsBaseplate, uAsset, uHasAsset, uAssetTiles, uAssetFace;
     private int lPos, lMvp, lColor, lAlpha;
@@ -362,6 +378,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             uLightVp = GLES20.glGetUniformLocation(program, "uLightVp");
             uShadowMap = GLES20.glGetUniformLocation(program, "uShadowMap");
             uHasShadow = GLES20.glGetUniformLocation(program, "uHasShadow");
+            uShadowSoftness = GLES20.glGetUniformLocation(program, "uShadowSoftness");
+            uTechLevel = GLES20.glGetUniformLocation(program, "uTechLevel");
+            uEnvDiffuse = GLES20.glGetUniformLocation(program, "uEnvDiffuse");
+            uExposure = GLES20.glGetUniformLocation(program, "uExposure");
+            uSkyTopCol = GLES20.glGetUniformLocation(program, "uSkyTopCol");
+            uSkyHorCol = GLES20.glGetUniformLocation(program, "uSkyHorCol");
+            uAtmoCol = GLES20.glGetUniformLocation(program, "uAtmoCol");
+            uAtmoDec = GLES20.glGetUniformLocation(program, "uAtmoDec");
+            uAtmoParams = GLES20.glGetUniformLocation(program, "uAtmoParams");
             shadowProgram = build(SHADOW_VERT, SHADOW_FRAG);
             shPos = GLES20.glGetAttribLocation(shadowProgram, "aPos");
             shLightMvp = GLES20.glGetUniformLocation(shadowProgram, "uLightMvp");
@@ -853,6 +878,15 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             else bindTexture(3, textures.atlasTexture());
         }
         if (uHasShadow >= 0) GLES20.glUniform1f(uHasShadow, (shadowReady && light.globalShadows) ? 1f : 0f);
+        if (uShadowSoftness >= 0) GLES20.glUniform1f(uShadowSoftness, (float) light.shadowSoftness);
+        if (uTechLevel >= 0) GLES20.glUniform1f(uTechLevel, (float) light.techLevel);
+        if (uEnvDiffuse >= 0) GLES20.glUniform1f(uEnvDiffuse, (float) light.environmentDiffuseScale);
+        if (uExposure >= 0) GLES20.glUniform1f(uExposure, (float) light.exposureCompensation);
+        if (uSkyTopCol >= 0) GLES20.glUniform3f(uSkyTopCol, (float) light.skyTop[0], (float) light.skyTop[1], (float) light.skyTop[2]);
+        if (uSkyHorCol >= 0) GLES20.glUniform3f(uSkyHorCol, (float) light.skyHorizon[0], (float) light.skyHorizon[1], (float) light.skyHorizon[2]);
+        if (uAtmoCol >= 0) GLES20.glUniform3f(uAtmoCol, (float) light.atmosphereColor[0], (float) light.atmosphereColor[1], (float) light.atmosphereColor[2]);
+        if (uAtmoDec >= 0) GLES20.glUniform3f(uAtmoDec, (float) light.atmosphereDecayColor[0], (float) light.atmosphereDecayColor[1], (float) light.atmosphereDecayColor[2]);
+        if (uAtmoParams >= 0) GLES20.glUniform4f(uAtmoParams, light.atmosphere ? (float) light.atmosphereDensity : 0f, (float) light.atmosphereOffset, (float) light.atmosphereHaze, (float) light.atmosphereGlare);
 
         int count = 0;
         for (EngineLighting.Light local : light.lights) {

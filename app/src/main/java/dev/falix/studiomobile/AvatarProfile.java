@@ -27,6 +27,7 @@ final class AvatarProfile {
     boolean loadedFromRoblox = false;
     AvatarMesh mesh3d = null;
     String statusNote = "default";
+    long idleAnimAssetId = 0, walkAnimAssetId = 0, runAnimAssetId = 0, jumpAnimAssetId = 0, fallAnimAssetId = 0;
 
     Bitmap headFaceBitmap;
     Bitmap torsoBitmap;
@@ -119,6 +120,16 @@ final class AvatarProfile {
                         faceId = id;
                     } else if (("HairAccessory".equalsIgnoreCase(typeName) || "Hat".equalsIgnoreCase(typeName)) && hairId == 0) {
                         hairId = id;
+                    } else if ("IdleAnimation".equalsIgnoreCase(typeName)) {
+                        p.idleAnimAssetId = id;
+                    } else if ("WalkAnimation".equalsIgnoreCase(typeName)) {
+                        p.walkAnimAssetId = id;
+                    } else if ("RunAnimation".equalsIgnoreCase(typeName)) {
+                        p.runAnimAssetId = id;
+                    } else if ("JumpAnimation".equalsIgnoreCase(typeName)) {
+                        p.jumpAnimAssetId = id;
+                    } else if ("FallAnimation".equalsIgnoreCase(typeName)) {
+                        p.fallAnimAssetId = id;
                     }
                 }
             }

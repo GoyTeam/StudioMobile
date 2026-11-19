@@ -57,6 +57,8 @@ final class EngineLighting {
     boolean atmosphere;
     double atmosphereDensity = 0.3, atmosphereOffset = 0, atmosphereDecay = 0.4, atmosphereGlare = 0, atmosphereHaze = 0;
     double[] atmosphereColor = {199 / 255.0, 199 / 255.0, 199 / 255.0};
+    double[] atmosphereDecayColor = {92 / 255.0, 60 / 255.0, 13 / 255.0};
+    int techLevel = 2; // 0=Compatibility, 1=Voxel, 2=ShadowMap, 3=Future
 
     // --- Clouds (only renders as a child of Terrain in Roblox) ---
     boolean clouds;
@@ -188,7 +190,8 @@ final class EngineLighting {
         l.atmosphere = true;
         l.atmosphereDensity = clamp01(number(a, "Density", l.atmosphereDensity));
         l.atmosphereOffset = clamp(number(a, "Offset", l.atmosphereOffset), -1, 1);
-        l.atmosphereDecay = clamp01(number(a, "Decay", l.atmosphereDecay));
+        l.atmosphereDecayColor = colour(a, "Decay", l.atmosphereDecayColor);
+        l.atmosphereDecay = clamp01((l.atmosphereDecayColor[0] + l.atmosphereDecayColor[1] + l.atmosphereDecayColor[2]) / 3.0);
         l.atmosphereGlare = Math.max(0, number(a, "Glare", l.atmosphereGlare));
         l.atmosphereHaze = Math.max(0, number(a, "Haze", l.atmosphereHaze));
         l.atmosphereColor = colour(a, "Color", l.atmosphereColor);
@@ -328,6 +331,10 @@ final class EngineLighting {
         ambientDiffuse = mul(clamp01(add(base, skyAmbient)), ambientGain);
 
         specularScale = environmentSpecularScale;
+        if ("Future".equalsIgnoreCase(technology)) techLevel = 3;
+        else if ("ShadowMap".equalsIgnoreCase(technology)) techLevel = 2;
+        else if ("Voxel".equalsIgnoreCase(technology)) techLevel = 1;
+        else techLevel = 0;
     }
 
     /** 0..1 fog blend for a view distance, matching linear Roblox fog between FogStart/FogEnd. */

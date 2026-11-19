@@ -132,6 +132,78 @@ final class RobloxAnimations {
         loadFromRobloxAsync(cacheDir, apiKey, log);
     }
 
+    /** Loads any custom animation packages equipped on the user's Roblox avatar (e.g. Ninja, Toy, Oldschool). */
+    static void loadCustomFromProfileAsync(final File cacheDir, final String apiKey,
+                                           final AvatarProfile profile, final LogCallback log) {
+        if (profile == null) return;
+        final Object[][] custom = {
+            {"r15_idle", profile.idleAnimAssetId, true},
+            {"r15_walk", profile.walkAnimAssetId, true},
+            {"r15_run",  profile.runAnimAssetId,  true},
+            {"r15_jump", profile.jumpAnimAssetId, false},
+            {"r15_fall", profile.fallAnimAssetId, true}
+        };
+        boolean any = false;
+        for (Object[] c : custom) if ((Long) c[1] > 0) { any = true; break; }
+        if (!any) return;
+        Thread t = new Thread(() -> {
+            File dir = new File(cacheDir, "rbx_anims");
+            if (!dir.exists()) dir.mkdirs();
+            int loadedCustom = 0;
+            for (Object[] spec : custom) {
+                String key = (String) spec[0];
+                long pkgId = (Long) spec[1];
+                boolean loop = (Boolean) spec[2];
+                if (pkgId <= 0) continue;
+                try {
+                    File pkgFile = new File(dir, "pkg_" + pkgId + ".rbxm");
+                    if (!pkgFile.exists() || pkgFile.length() < 32) downloadAsset(pkgId, apiKey, pkgFile);
+                    if (!pkgFile.exists() || pkgFile.length() < 32) continue;
+                    // Package may be a direct KeyframeSequence or a Folder containing Animation(AnimationId=rbxassetid://...)
+                    Clip direct = decodeClip(key, pkgId, loop, pkgFile);
+                    if (direct != null && !direct.frames.isEmpty()) {
+                        CLIPS.put(key, direct);
+                        loadedCustom++;
+                        continue;
+                    }
+                    long innerId = extractAnimationId(pkgFile);
+                    if (innerId > 0) {
+                        File kfFile = new File(dir, innerId + ".rbxm");
+                        if (!kfFile.exists() || kfFile.length() < 32) downloadAsset(innerId, apiKey, kfFile);
+                        if (kfFile.exists() && kfFile.length() >= 32) {
+                            Clip clip = decodeClip(key, innerId, loop, kfFile);
+                            if (clip != null && !clip.frames.isEmpty()) {
+                                CLIPS.put(key, clip);
+                                loadedCustom++;
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) { }
+            }
+            if (loadedCustom > 0 && log != null) {
+                log.log("info", "Loaded " + loadedCustom + " custom equipped Roblox avatar animation(s).");
+            }
+        }, "RobloxCustomAnims");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static long extractAnimationId(File pkgFile) {
+        try {
+            PlaceDecoder.Result res = PlaceDecoder.decode(pkgFile);
+            if (res == null || res.root == null) return 0;
+            Instance anim = findFirstByClass(res.root, "Animation");
+            if (anim == null) return 0;
+            Object v = anim.props.get("AnimationId");
+            if (!(v instanceof String)) return 0;
+            String s = (String) v;
+            String digits = s.replaceAll("[^0-9]", "");
+            return digits.isEmpty() ? 0 : Long.parseLong(digits);
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
     private static void downloadAsset(long assetId, String apiKey, File target) throws Exception {
         // 1. Try Open Cloud Asset Delivery when API key is available
         if (apiKey != null && !apiKey.isEmpty()) {
@@ -334,21 +406,21 @@ final class RobloxAnimations {
             JointSample rul = sample(a, b, "RightUpperLeg", s);
             JointSample rll = sample(a, b, "RightLowerLeg", s);
 
-            p.bobY = lt.ty;
-            p.torsoPitch = lt.rx + ut.rx;
-            p.torsoYaw = lt.ry + ut.ry;
-            p.headYaw = hd.ry;
-            p.headPitch = hd.rx;
-            p.lUpperArmX = lua.rx;
-            p.lUpperArmZ = lua.rz;
-            p.lLowerArmX = lla.rx;
-            p.rUpperArmX = rua.rx;
-            p.rUpperArmZ = rua.rz;
-            p.rLowerArmX = rla.rx;
-            p.lUpperLegX = lul.rx;
-            p.lLowerLegX = lll.rx;
-            p.rUpperLegX = rul.rx;
-            p.rLowerLegX = rll.rx;
+            p.bobY = clamp(lt.ty, -0.35f, 0.35f);
+            p.torsoPitch = clamp(lt.rx + ut.rx * 0.5f, -0.35f, 0.35f);
+            p.torsoYaw = clamp(lt.ry + ut.ry * 0.5f, -0.35f, 0.35f);
+            p.headYaw = clamp(hd.ry, -0.6f, 0.6f);
+            p.headPitch = clamp(hd.rx, -0.4f, 0.4f);
+            p.lUpperArmX = clamp(lua.rx, -3.1f, 1.4f);
+            p.lUpperArmZ = clamp(lua.rz, -0.6f, 0.6f);
+            p.lLowerArmX = clamp(lla.rx, -1.5f, 0.25f);
+            p.rUpperArmX = clamp(rua.rx, -3.1f, 1.4f);
+            p.rUpperArmZ = clamp(rua.rz, -0.6f, 0.6f);
+            p.rLowerArmX = clamp(rla.rx, -1.5f, 0.25f);
+            p.lUpperLegX = clamp(lul.rx, -1.35f, 1.35f);
+            p.lLowerLegX = clamp(lll.rx, -0.15f, 1.45f);
+            p.rUpperLegX = clamp(rul.rx, -1.35f, 1.35f);
+            p.rLowerLegX = clamp(rll.rx, -0.15f, 1.45f);
         } else {
             JointSample tr = sample(a, b, "Torso", s);
             JointSample hd = sample(a, b, "Head", s);
@@ -357,18 +429,50 @@ final class RobloxAnimations {
             JointSample ll = sample(a, b, "Left Leg", s);
             JointSample rl = sample(a, b, "Right Leg", s);
 
-            p.bobY = tr.ty;
-            p.torsoPitch = tr.rx;
-            p.torsoYaw = tr.ry;
-            p.headYaw = hd.ry;
-            p.headPitch = hd.rx;
-            // R6 Motor6D shoulder/hip joints rotate around local Z/X in Roblox's KeyframeSequence
-            p.lUpperArmX = Math.abs(la.rx) > Math.abs(la.rz) ? la.rx : -la.rz;
-            p.rUpperArmX = Math.abs(ra.rx) > Math.abs(ra.rz) ? ra.rx : ra.rz;
-            p.lUpperLegX = Math.abs(ll.rx) > Math.abs(ll.rz) ? ll.rx : -ll.rz;
-            p.rUpperLegX = Math.abs(rl.rx) > Math.abs(rl.rz) ? rl.rx : rl.rz;
+            p.bobY = clamp(tr.ty, -0.30f, 0.30f);
+            p.torsoPitch = clamp(tr.rx, -0.30f, 0.30f);
+            p.torsoYaw = clamp(tr.ry, -0.30f, 0.30f);
+            p.headYaw = clamp(hd.ry, -0.6f, 0.6f);
+            p.headPitch = clamp(hd.rx, -0.4f, 0.4f);
+            // R6 Motor6D shoulder/hip C0 frames are rotated ±90 deg around Y, so forward/back swing is Z/X
+            p.lUpperArmX = clamp(Math.abs(la.rx) > Math.abs(la.rz) ? la.rx : -la.rz, -3.1f, 1.4f);
+            p.rUpperArmX = clamp(Math.abs(ra.rx) > Math.abs(ra.rz) ? ra.rx : ra.rz, -3.1f, 1.4f);
+            p.lUpperLegX = clamp(Math.abs(ll.rx) > Math.abs(ll.rz) ? ll.rx : -ll.rz, -1.35f, 1.35f);
+            p.rUpperLegX = clamp(Math.abs(rl.rx) > Math.abs(rl.rz) ? rl.rx : rl.rz, -1.35f, 1.35f);
         }
-        return p;
+        return smoothPose(p);
+    }
+
+    private static final Pose PREV_POSE = new Pose();
+    private static long lastEvalNs = 0;
+
+    private static float clamp(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    private static Pose smoothPose(Pose target) {
+        long now = System.nanoTime();
+        float dt = lastEvalNs == 0 ? 0.016f : Math.min(0.05f, (now - lastEvalNs) / 1e9f);
+        lastEvalNs = now;
+        // 0.12s smooth crossfade matching Roblox Animate script fadeTime
+        float k = Math.min(1f, dt * 14f);
+        PREV_POSE.bobY += (target.bobY - PREV_POSE.bobY) * k;
+        PREV_POSE.torsoPitch += (target.torsoPitch - PREV_POSE.torsoPitch) * k;
+        PREV_POSE.torsoYaw += (target.torsoYaw - PREV_POSE.torsoYaw) * k;
+        PREV_POSE.headYaw += (target.headYaw - PREV_POSE.headYaw) * k;
+        PREV_POSE.headPitch += (target.headPitch - PREV_POSE.headPitch) * k;
+        PREV_POSE.lUpperArmX += (target.lUpperArmX - PREV_POSE.lUpperArmX) * k;
+        PREV_POSE.lUpperArmZ += (target.lUpperArmZ - PREV_POSE.lUpperArmZ) * k;
+        PREV_POSE.lLowerArmX += (target.lLowerArmX - PREV_POSE.lLowerArmX) * k;
+        PREV_POSE.rUpperArmX += (target.rUpperArmX - PREV_POSE.rUpperArmX) * k;
+        PREV_POSE.rUpperArmZ += (target.rUpperArmZ - PREV_POSE.rUpperArmZ) * k;
+        PREV_POSE.rLowerArmX += (target.rLowerArmX - PREV_POSE.rLowerArmX) * k;
+        PREV_POSE.lUpperLegX += (target.lUpperLegX - PREV_POSE.lUpperLegX) * k;
+        PREV_POSE.lLowerLegX += (target.lLowerLegX - PREV_POSE.lLowerLegX) * k;
+        PREV_POSE.rUpperLegX += (target.rUpperLegX - PREV_POSE.rUpperLegX) * k;
+        PREV_POSE.rLowerLegX += (target.rLowerLegX - PREV_POSE.rLowerLegX) * k;
+        PREV_POSE.fromRoblox = target.fromRoblox;
+        return PREV_POSE;
     }
 
     private static JointSample sample(Frame a, Frame b, String name, float t) {

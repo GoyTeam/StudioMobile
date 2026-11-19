@@ -389,6 +389,8 @@ public final class EngineActivity extends Activity {
             scene.use3dAvatar = false;
             if (rigPill != null) rigPill.setText(scene.avatar.isR15 ? "R15" : "R6");
             Toast.makeText(this, "Switched avatar rig to " + (scene.avatar.isR15 ? "R15" : "R6"), Toast.LENGTH_SHORT).show();
+        } else if ("MODEL".equals(tab)) {
+            showLightingQuickMenu();
         } else if ("PLUGINS".equals(tab)) {
             togglePanel(toolboxPanel, null);
         }
@@ -455,6 +457,52 @@ public final class EngineActivity extends Activity {
         loadingOverlay.animate().alpha(0f).setDuration(240).withEndAction(() -> {
             if (loadingOverlay != null) loadingOverlay.setVisibility(View.GONE);
         }).start();
+    }
+
+    private void showLightingQuickMenu() {
+        String[] items = {
+            "Technology: Future (PBR + Local Specular)",
+            "Technology: ShadowMap (Sun Shadows)",
+            "Technology: Voxel (Soft Ambient)",
+            "Time: Studio Afternoon (14:00)",
+            "Time: Golden Dawn (06:30)",
+            "Time: Bright Noon (12:00)",
+            "Time: Warm Sunset (17:45)",
+            "Time: Starry Night (22:00)",
+            "Toggle GlobalShadows",
+            "Toggle Atmospheric Haze"
+        };
+        new AlertDialog.Builder(this).setTitle("Roblox Lighting").setItems(items, (d, which) -> {
+            Instance lighting = scene.root == null ? null : scene.root.findFirst("Lighting");
+            if (lighting == null) return;
+            if (which == 0) { lighting.props.put("Technology", 3); lighting.props.put("EnvironmentDiffuseScale", 0.5); lighting.props.put("EnvironmentSpecularScale", 1.0); }
+            else if (which == 1) { lighting.props.put("Technology", 2); }
+            else if (which == 2) { lighting.props.put("Technology", 1); }
+            else if (which == 3) { lighting.props.put("ClockTime", 14.0); lighting.props.put("Brightness", 2.0); }
+            else if (which == 4) { lighting.props.put("ClockTime", 6.5); lighting.props.put("Brightness", 2.2); }
+            else if (which == 5) { lighting.props.put("ClockTime", 12.0); lighting.props.put("Brightness", 2.4); }
+            else if (which == 6) { lighting.props.put("ClockTime", 17.75); lighting.props.put("Brightness", 2.1); }
+            else if (which == 7) { lighting.props.put("ClockTime", 22.0); lighting.props.put("Brightness", 1.0); }
+            else if (which == 8) { lighting.props.put("GlobalShadows", !lighting.getBool("GlobalShadows", true)); }
+            else if (which == 9) {
+                Instance atmo = lighting.findFirst("Atmosphere");
+                if (atmo == null) {
+                    atmo = new Instance("Atmosphere", "Atmosphere");
+                    atmo.props.put("Density", 0.35);
+                    atmo.props.put("Offset", 0.25);
+                    atmo.props.put("Haze", 1.4);
+                    atmo.props.put("Glare", 0.3);
+                    atmo.props.put("Color", new int[]{199, 208, 224});
+                    atmo.props.put("Decay", new int[]{106, 122, 148});
+                    lighting.add(atmo);
+                } else {
+                    lighting.children.remove(atmo);
+                }
+            }
+            scene.markDirty();
+            scene.refreshCache();
+            scene.logOutput("info", "Lighting updated: " + scene.lighting.summary());
+        }).show();
     }
 
     private void togglePanel(View panel, View separator) {
@@ -697,6 +745,11 @@ public final class EngineActivity extends Activity {
         respawnBtn.setBackground(shape(0xff343c4d, 8));
         respawnBtn.setOnClickListener(v -> scene.respawnCharacter());
         hudRow.addView(respawnBtn, margin(dp(6), 0, -2, -2));
+        TextView lightBtn = text("☀", 12f, true, 0xFFFFD56B);
+        lightBtn.setPadding(dp(8), dp(2), dp(8), dp(2));
+        lightBtn.setBackground(shape(0xFF343C4D, 8));
+        lightBtn.setOnClickListener(v -> showLightingQuickMenu());
+        hudRow.addView(lightBtn, margin(dp(6), 0, -2, -2));
         FrameLayout.LayoutParams hudLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
         hudLp.setMargins(dp(10), dp(10), 0, 0);
         layer.addView(hudRow, hudLp);
@@ -707,7 +760,7 @@ public final class EngineActivity extends Activity {
         guiLp.setMargins(0, dp(10), dp(12), 0);
         layer.addView(guiOverlay, guiLp);
 
-        jumpButton = roundButton("JUMP", () -> { scene.jumpQueued = true; viewport.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); });
+        jumpButton = roundButton("▲", () -> { scene.jumpQueued = true; viewport.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); });
         FrameLayout.LayoutParams jump = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.RIGHT);
         jump.setMargins(0, 0, dp(20), dp(20));
         layer.addView(jumpButton, jump);
@@ -936,6 +989,7 @@ public final class EngineActivity extends Activity {
                 if (uid > 0) {
                     AvatarProfile av = AvatarProfile.fetchForUser(api, apiKey, uid, uname);
                     scene.avatar = av;
+                    RobloxAnimations.loadCustomFromProfileAsync(getCacheDir(), apiKey, av, (lvl, msg) -> scene.logOutput(lvl, msg));
                     scene.use3dAvatar = true;
                     scene.logOutput("info", av.statusSummary());
                     runOnUiThread(() -> {
@@ -1889,6 +1943,7 @@ public final class EngineActivity extends Activity {
         if (flySpeedPill != null) flySpeedPill.setVisibility(View.GONE);
         if (viewCube != null) viewCube.setVisibility(View.GONE);
         if (bottomCmdBar != null) bottomCmdBar.setVisibility(View.GONE);
+        if (docTabStrip != null) docTabStrip.setVisibility(View.GONE);
         scene.startPlay();
         playControls.setVisibility(View.VISIBLE);
         if (liftPad != null) liftPad.setVisibility(View.GONE);
@@ -1917,6 +1972,7 @@ public final class EngineActivity extends Activity {
         if (flySpeedPill != null) flySpeedPill.setVisibility(View.VISIBLE);
         if (viewCube != null) viewCube.setVisibility(View.VISIBLE);
         if (bottomCmdBar != null) bottomCmdBar.setVisibility(View.VISIBLE);
+        if (docTabStrip != null) docTabStrip.setVisibility(View.VISIBLE);
         if (liftPad != null) liftPad.setVisibility(View.VISIBLE);
         flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Play");
