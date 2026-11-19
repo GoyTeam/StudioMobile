@@ -24,6 +24,7 @@ final class AvatarProfile {
     String username = "Player";
     int assetCount = 0;
     boolean loadedFromRoblox = false;
+    AvatarMesh mesh3d = null;
 
     static AvatarProfile defaultAvatar() {
         return new AvatarProfile();
@@ -104,6 +105,7 @@ final class AvatarProfile {
             if (p.shirtColor == null || p.pantsColor == null || !p.hasHair) {
                 sampleFullBodyThumbnail(api, userId, p);
             }
+            p.mesh3d = AvatarMesh.fetch(api, userId);
             p.loadedFromRoblox = true;
         } catch (Throwable ignored) { }
         return p;

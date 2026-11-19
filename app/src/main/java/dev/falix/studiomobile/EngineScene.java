@@ -47,6 +47,7 @@ final class EngineScene {
     double walkSpeed = 16, jumpPower = 50, gravity = 196.2;
     double charHx = 1, charHy = 2.5, charHz = 1;
     volatile AvatarProfile avatar = AvatarProfile.defaultAvatar();
+    volatile boolean use3dAvatar = true;
     volatile double charHealth = 100, charMaxHealth = 100;
     volatile double charWalkPhase = 0, charSpeed = 0;
     volatile double idleTime = 0, landTimer = 0;

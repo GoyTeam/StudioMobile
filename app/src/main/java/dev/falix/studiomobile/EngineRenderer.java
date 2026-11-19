@@ -1,6 +1,7 @@
 package dev.falix.studiomobile;
 
 import android.opengl.GLES20;
+import android.opengl.GLUtils;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
 import java.nio.ByteBuffer;
@@ -101,15 +102,16 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec2 atlasUv = tile.xy * uAtlasStep + (cell * (1.0 - 2.0 * EDGE) + EDGE) * uAtlasStep;\n" +
             "  vec3 base = uColor;\n" +
             "  if (uIsBaseplate > 0.5 && n.y > 0.5) {\n" +
-            "    float distFade = 1.0 - smoothstep(55.0, 320.0, length(uEye - vWorld));\n" +
+            "    float distFade = 1.0 - smoothstep(45.0, 280.0, length(uEye - vWorld));\n" +
             "    vec2 g1 = abs(fract(vWorld.xz - 0.5) - 0.5);\n" +
-            "    float line1 = 1.0 - smoothstep(0.018, 0.042, min(g1.x, g1.y));\n" +
+            "    float line1 = 1.0 - smoothstep(0.014, 0.036, min(g1.x, g1.y));\n" +
             "    vec2 g4 = abs(fract(vWorld.xz * 0.25 - 0.5) - 0.5);\n" +
-            "    float line4 = 1.0 - smoothstep(0.009, 0.022, min(g4.x, g4.y));\n" +
+            "    float line4 = 1.0 - smoothstep(0.008, 0.020, min(g4.x, g4.y));\n" +
+            "    float crossDot = (1.0 - smoothstep(0.035, 0.065, g4.x)) * (1.0 - smoothstep(0.035, 0.065, g4.y));\n" +
             "    vec2 checker = floor(vWorld.xz * 0.25);\n" +
-            "    float tileShade = mod(checker.x + checker.y, 2.0) * 0.028;\n" +
-            "    vec3 studioSlate = uColor * vec3(0.68, 0.70, 0.73);\n" +
-            "    base = studioSlate * (1.0 - (line1 * 0.07 + line4 * 0.18 + tileShade) * distFade);\n" +
+            "    float tileShade = mod(checker.x + checker.y, 2.0) * 0.035;\n" +
+            "    vec3 studioSlate = vec3(0.39, 0.41, 0.44);\n" +
+            "    base = studioSlate * (1.0 - (line1 * 0.09 + line4 * 0.26 + tileShade) * distFade + crossDot * 0.08 * distFade);\n" +
             "  } else if (tile.w > 0.5) {\n" +
             "    base *= texture2D(uAtlas, atlasUv).rgb;\n" +
             "  }\n" +
@@ -119,7 +121,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec3 skyAmbient = mix(uAmbient * 0.65 + vec3(0.08, 0.08, 0.09), uAmbient * 0.95 + vec3(0.14, 0.18, 0.24), hemi);\n" +
             "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
             "  float shadow = calcShadow(vShadowPos, ndl);\n" +
-            "  vec3 light = skyAmbient + uSunColor * ndl * uSunGain * 0.95 * (1.0 - shadow * 0.62);\n" +
+            "  vec3 light = skyAmbient + uSunColor * ndl * uSunGain * 0.95 * (1.0 - shadow * 0.74);\n" +
             "  light += uShiftTop * ndl * 0.4 + uShiftBottom * (1.0 - ndl) * 0.3;\n" +
             "  for (int i = 0; i < 4; i++) {\n" +
             "    float used = i < uLightCount ? 1.0 : 0.0;\n" +
@@ -153,6 +155,23 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  gl_FragColor = vec4(mix(col, uFogColor, fog), uAlpha);\n" +
             "}";
 
+    private static final String AVATAR_VERT =
+            "uniform mat4 uMvp; uniform mat3 uNormal; attribute vec3 aPos; attribute vec3 aNorm; attribute vec2 aUv;\n" +
+            "varying vec3 vNormal; varying vec2 vUv;\n" +
+            "void main(){ vNormal = normalize(uNormal * aNorm); vUv = aUv; gl_Position = uMvp * vec4(aPos, 1.0); }";
+    private static final String AVATAR_FRAG =
+            "precision highp float; varying vec3 vNormal; varying vec2 vUv;\n" +
+            "uniform sampler2D uTex; uniform float uHasTex; uniform vec3 uSunDir; uniform vec3 uSunColor; uniform float uSunGain; uniform vec3 uAmbient;\n" +
+            "void main(){\n" +
+            "  vec3 n = normalize(vNormal);\n" +
+            "  vec3 base = uHasTex > 0.5 ? texture2D(uTex, vUv).rgb : vec3(0.85, 0.86, 0.88);\n" +
+            "  float hemi = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);\n" +
+            "  vec3 amb = mix(uAmbient * 0.7 + vec3(0.14), uAmbient + vec3(0.22, 0.25, 0.30), hemi);\n" +
+            "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
+            "  vec3 col = base * (amb + uSunColor * ndl * uSunGain * 0.9);\n" +
+            "  col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);\n" +
+            "  gl_FragColor = vec4(col, 1.0);\n" +
+            "}";
     private static final String SHADOW_VERT =
             "uniform mat4 uLightMvp; attribute vec3 aPos; varying float vDepth;\n" +
             "void main(){ vec4 p = uLightMvp * vec4(aPos, 1.0); vDepth = p.z / p.w * 0.5 + 0.5; gl_Position = p; }";
@@ -244,6 +263,10 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private int program, shadowProgram, lineProgram, skyProgram, brightProgram, blurProgram, raysProgram, postProgram;
     private int aPos, aLocal, aFace, uMvp, uModel, uNormal, uLightVp, uShadowMap, uHasShadow, uUseCustomNorm, uColor, uAlpha;
     private int shPos, shLightMvp;
+    private int avatarProgram, avPos, avNorm, avUv, avMvp, avNormal, avTex, avHasTex, avSunDir, avSunColor, avSunGain, avAmbient;
+    private AvatarMesh uploadedAvatarMesh;
+    private FloatBuffer avatarPosBuf, avatarNormBuf, avatarUvBuf;
+    private int avatarGlTex, avatarVertCount;
     private int shadowFbo, shadowTex, shadowDepthRb;
     private boolean shadowReady;
     private final float[] mLightView = new float[16], mLightProj = new float[16], mLightVp = new float[16], mLightMvp = new float[16];
@@ -328,6 +351,18 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             shadowProgram = build(SHADOW_VERT, SHADOW_FRAG);
             shPos = GLES20.glGetAttribLocation(shadowProgram, "aPos");
             shLightMvp = GLES20.glGetUniformLocation(shadowProgram, "uLightMvp");
+            avatarProgram = build(AVATAR_VERT, AVATAR_FRAG);
+            avPos = GLES20.glGetAttribLocation(avatarProgram, "aPos");
+            avNorm = GLES20.glGetAttribLocation(avatarProgram, "aNorm");
+            avUv = GLES20.glGetAttribLocation(avatarProgram, "aUv");
+            avMvp = GLES20.glGetUniformLocation(avatarProgram, "uMvp");
+            avNormal = GLES20.glGetUniformLocation(avatarProgram, "uNormal");
+            avTex = GLES20.glGetUniformLocation(avatarProgram, "uTex");
+            avHasTex = GLES20.glGetUniformLocation(avatarProgram, "uHasTex");
+            avSunDir = GLES20.glGetUniformLocation(avatarProgram, "uSunDir");
+            avSunColor = GLES20.glGetUniformLocation(avatarProgram, "uSunColor");
+            avSunGain = GLES20.glGetUniformLocation(avatarProgram, "uSunGain");
+            avAmbient = GLES20.glGetUniformLocation(avatarProgram, "uAmbient");
             uUseCustomNorm = GLES20.glGetUniformLocation(program, "uUseCustomNorm");
             uColor = GLES20.glGetUniformLocation(program, "uColor");
             uAlpha = GLES20.glGetUniformLocation(program, "uAlpha");
@@ -798,7 +833,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float sl = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
         sx /= sl; sy /= sl; sz /= sl;
         Matrix.setLookAtM(mLightView, 0, cx + sx * 90f, cy + sy * 90f, cz + sz * 90f, cx, cy, cz, 0f, 1f, 0f);
-        Matrix.orthoM(mLightProj, 0, -55f, 55f, -55f, 55f, 10f, 220f);
+        Matrix.orthoM(mLightProj, 0, -34f, 34f, -34f, 34f, 10f, 200f);
         Matrix.multiplyMM(mLightVp, 0, mLightProj, 0, mLightView, 0);
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, shadowFbo);
@@ -821,13 +856,25 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             GLES20.glDrawElements(GLES20.GL_TRIANGLES, 36, GLES20.GL_UNSIGNED_SHORT, cubeIndices);
         }
         if (scene.playing) {
+            ensureAvatarMeshUploaded();
             double[] p = scene.charPos;
-            double[] cc = {p[0], p[1] - scene.charHy + 2.6, p[2], 1, 0, 0, 0, 1, 0, 0, 0, 1};
-            setModel(cc, 2.2f, 5.0f, 1.2f);
-            Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
-            GLES20.glUniformMatrix4fv(shLightMvp, 1, false, mLightMvp, 0);
-            GLES20.glVertexAttribPointer(shPos, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
-            GLES20.glDrawElements(GLES20.GL_TRIANGLES, 36, GLES20.GL_UNSIGNED_SHORT, cubeIndices);
+            double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
+            float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
+            if (avatarPosBuf != null && avatarVertCount > 0 && scene.use3dAvatar) {
+                double[] cc = {p[0], p[1] - scene.charHy, p[2], cy, 0, sy, 0, 1, 0, -sy, 0, cy};
+                setModel(cc, 1f, 1f, 1f);
+                Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
+                GLES20.glUniformMatrix4fv(shLightMvp, 1, false, mLightMvp, 0);
+                GLES20.glVertexAttribPointer(shPos, 3, GLES20.GL_FLOAT, false, 0, avatarPosBuf);
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, avatarVertCount);
+            } else {
+                double[] cc = {p[0], p[1] - scene.charHy + 2.6, p[2], cy, 0, sy, 0, 1, 0, -sy, 0, cy};
+                setModel(cc, 2.2f, 5.0f, 1.2f);
+                Matrix.multiplyMM(mLightMvp, 0, mLightVp, 0, mModel, 0);
+                GLES20.glUniformMatrix4fv(shLightMvp, 1, false, mLightMvp, 0);
+                GLES20.glVertexAttribPointer(shPos, 3, GLES20.GL_FLOAT, false, 0, cubePositions);
+                GLES20.glDrawElements(GLES20.GL_TRIANGLES, 36, GLES20.GL_UNSIGNED_SHORT, cubeIndices);
+            }
         }
         GLES20.glDisableVertexAttribArray(shPos);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
@@ -1167,10 +1214,74 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glLineWidth(1f);
     }
 
+    private void ensureAvatarMeshUploaded() {
+        AvatarProfile av = scene.avatar;
+        if (av == null || av.mesh3d == null || av.mesh3d == uploadedAvatarMesh) return;
+        uploadedAvatarMesh = av.mesh3d;
+        avatarPosBuf = floatBuffer(uploadedAvatarMesh.positions);
+        avatarNormBuf = floatBuffer(uploadedAvatarMesh.normals);
+        avatarUvBuf = floatBuffer(uploadedAvatarMesh.uvs);
+        avatarVertCount = uploadedAvatarMesh.vertexCount;
+        if (avatarGlTex != 0) { GLES20.glDeleteTextures(1, new int[]{avatarGlTex}, 0); avatarGlTex = 0; }
+        if (uploadedAvatarMesh.textureBitmap != null && !uploadedAvatarMesh.textureBitmap.isRecycled()) {
+            int[] ids = new int[1];
+            GLES20.glGenTextures(1, ids, 0);
+            avatarGlTex = ids[0];
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, avatarGlTex);
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, uploadedAvatarMesh.textureBitmap, 0);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        }
+    }
+
     private void drawCharacter(EngineLighting light) {
         if (scene.firstPerson) return;
         if (uIsBaseplate >= 0) GLES20.glUniform1f(uIsBaseplate, 0f);
         AvatarProfile av = scene.avatar != null ? scene.avatar : AvatarProfile.defaultAvatar();
+        ensureAvatarMeshUploaded();
+        if (scene.use3dAvatar && avatarPosBuf != null && avatarVertCount > 0) {
+            double[] p = scene.charPos;
+            double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
+            float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
+            float speedFrac = (float) Math.min(1.0, scene.charSpeed / Math.max(1.0, scene.walkSpeed));
+            float bob = scene.onGround ? Math.abs((float) Math.sin(scene.charWalkPhase)) * 0.16f * speedFrac : 0f;
+            float roll = scene.onGround ? (float) Math.sin(scene.charWalkPhase) * 0.045f * speedFrac : 0f;
+            float cr = (float) Math.cos(roll), sr = (float) Math.sin(roll);
+            double[] c = {
+                p[0], p[1] - scene.charHy + bob, p[2],
+                cy * cr, -cy * sr, sy,
+                sr, cr, 0,
+                -sy * cr, sy * sr, cy
+            };
+            setModel(c, 1f, 1f, 1f);
+            GLES20.glDisable(GLES20.GL_CULL_FACE);
+            GLES20.glUseProgram(avatarProgram);
+            GLES20.glUniformMatrix4fv(avMvp, 1, false, mMvp, 0);
+            GLES20.glUniformMatrix3fv(avNormal, 1, false, normal3, 0);
+            GLES20.glUniform3f(avSunDir, (float) light.sunDirection[0], (float) light.sunDirection[1], (float) light.sunDirection[2]);
+            GLES20.glUniform3f(avSunColor, (float) light.sunColor[0], (float) light.sunColor[1], (float) light.sunColor[2]);
+            GLES20.glUniform1f(avSunGain, (float) light.sunGain);
+            GLES20.glUniform3f(avAmbient, (float) light.ambientDiffuse[0], (float) light.ambientDiffuse[1], (float) light.ambientDiffuse[2]);
+            GLES20.glUniform1i(avTex, 0);
+            if (avatarGlTex != 0) {
+                bindTexture(0, avatarGlTex);
+                GLES20.glUniform1f(avHasTex, 1f);
+            } else {
+                GLES20.glUniform1f(avHasTex, 0f);
+            }
+            GLES20.glEnableVertexAttribArray(avPos);
+            GLES20.glVertexAttribPointer(avPos, 3, GLES20.GL_FLOAT, false, 0, avatarPosBuf);
+            if (avNorm >= 0) { GLES20.glEnableVertexAttribArray(avNorm); GLES20.glVertexAttribPointer(avNorm, 3, GLES20.GL_FLOAT, false, 0, avatarNormBuf); }
+            if (avUv >= 0) { GLES20.glEnableVertexAttribArray(avUv); GLES20.glVertexAttribPointer(avUv, 2, GLES20.GL_FLOAT, false, 0, avatarUvBuf); }
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, avatarVertCount);
+            GLES20.glDisableVertexAttribArray(avPos);
+            if (avNorm >= 0) GLES20.glDisableVertexAttribArray(avNorm);
+            if (avUv >= 0) GLES20.glDisableVertexAttribArray(avUv);
+            GLES20.glEnable(GLES20.GL_CULL_FACE);
+            return;
+        }
         double[] p = scene.charPos;
         double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
         float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
