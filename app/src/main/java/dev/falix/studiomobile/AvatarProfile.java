@@ -124,7 +124,9 @@ final class AvatarProfile {
             }
 
             Bitmap faceBmp = faceId > 0 ? fetchAssetThumbnail(api, faceId, 256) : null;
-            Bitmap fullBody = fetchUserThumbnail(api, "https://thumbnails.roblox.com/v1/users/avatar?userIds=" + userId + "&size=352x352&format=Png&isCircular=false", 352);
+            Bitmap fullBody = fetchUserThumbnail(api, "https://thumbnails.roblox.com/v1/users/avatar?userIds=" + userId + "&size=420x420&format=Png&isCircular=false", 420);
+            Bitmap shirtTpl = shirtId > 0 ? fetchClassicClothingTemplate(api, shirtId) : null;
+            Bitmap pantsTpl = pantsId > 0 ? fetchClassicClothingTemplate(api, pantsId) : null;
             if (hairId > 0) {
                 Bitmap hb = fetchAssetThumbnail(api, hairId, 150);
                 if (hb != null) {
@@ -145,11 +147,34 @@ final class AvatarProfile {
                 p.shirtColor = sampleRegion(fullBody, w * 36 / 100, w * 64 / 100, h * 36 / 100, h * 54 / 100, false);
                 p.sleeveColor = sampleRegion(fullBody, w * 22 / 100, w * 34 / 100, h * 38 / 100, h * 54 / 100, false);
                 p.pantsColor = sampleRegion(fullBody, w * 36 / 100, w * 64 / 100, h * 62 / 100, h * 86 / 100, false);
-                p.torsoBitmap = solidSwatch(p.effectiveTorsoColor());
-                p.armBitmap = solidSwatch(p.effectiveLeftArmColor());
-                p.legBitmap = solidSwatch(p.effectiveLeftLegColor());
+                if (shirtTpl != null && shirtTpl.getWidth() >= 500 && shirtTpl.getHeight() >= 500) {
+                    int tw = shirtTpl.getWidth(), th = shirtTpl.getHeight();
+                    p.torsoBitmap = compositeCrop(p.torsoColor, shirtTpl, tw * 231 / 585, th * 74 / 559, tw * 128 / 585, th * 128 / 559);
+                    p.armBitmap = compositeCrop(p.leftArmColor, shirtTpl, tw * 308 / 585, th * 355 / 559, tw * 64 / 585, th * 128 / 559);
+                } else {
+                    p.torsoBitmap = compositeCrop(p.effectiveTorsoColor(), fullBody, w * 37 / 100, h * 35 / 100, w * 26 / 100, h * 22 / 100);
+                    p.armBitmap = compositeCrop(p.effectiveLeftArmColor(), fullBody, w * 24 / 100, h * 36 / 100, w * 13 / 100, h * 22 / 100);
+                }
+                if (pantsTpl != null && pantsTpl.getWidth() >= 500 && pantsTpl.getHeight() >= 500) {
+                    int pw = pantsTpl.getWidth(), ph = pantsTpl.getHeight();
+                    p.legBitmap = compositeCrop(p.leftLegColor, pantsTpl, pw * 308 / 585, ph * 355 / 559, pw * 64 / 585, ph * 128 / 559);
+                } else {
+                    p.legBitmap = compositeCrop(p.effectiveLeftLegColor(), fullBody, w * 38 / 100, h * 60 / 100, w * 24 / 100, h * 28 / 100);
+                }
                 fullBody.recycle();
+            } else {
+                if (shirtTpl != null && shirtTpl.getWidth() >= 500 && shirtTpl.getHeight() >= 500) {
+                    int tw = shirtTpl.getWidth(), th = shirtTpl.getHeight();
+                    p.torsoBitmap = compositeCrop(p.torsoColor, shirtTpl, tw * 231 / 585, th * 74 / 559, tw * 128 / 585, th * 128 / 559);
+                    p.armBitmap = compositeCrop(p.leftArmColor, shirtTpl, tw * 308 / 585, th * 355 / 559, tw * 64 / 585, th * 128 / 559);
+                }
+                if (pantsTpl != null && pantsTpl.getWidth() >= 500 && pantsTpl.getHeight() >= 500) {
+                    int pw = pantsTpl.getWidth(), ph = pantsTpl.getHeight();
+                    p.legBitmap = compositeCrop(p.leftLegColor, pantsTpl, pw * 308 / 585, ph * 355 / 559, pw * 64 / 585, ph * 128 / 559);
+                }
             }
+            if (shirtTpl != null) shirtTpl.recycle();
+            if (pantsTpl != null) pantsTpl.recycle();
             p.headFaceBitmap = compositeFace(p.headColor, faceBmp);
             if (faceBmp != null) faceBmp.recycle();
             if (p.torsoBitmap == null) p.torsoBitmap = solidSwatch(p.effectiveTorsoColor());
@@ -238,6 +263,28 @@ final class AvatarProfile {
 
     private static float colorDiff(float[] a, float[] b) {
         return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+    }
+
+    private static Bitmap fetchClassicClothingTemplate(RobloxApi api, long assetId) {
+        try {
+            String url = "https://assetdelivery.roblox.com/v1/asset/?id=" + assetId;
+            okhttp3.Request req = new okhttp3.Request.Builder().url(url).header("User-Agent", "Mozilla/5.0").get().build();
+            String xml;
+            try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
+                if (!res.isSuccessful() || res.body() == null) return null;
+                xml = res.body().string();
+            }
+            int idx = xml.indexOf("id=");
+            if (idx < 0) return null;
+            int start = idx + 3;
+            int end = start;
+            while (end < xml.length() && Character.isDigit(xml.charAt(end))) end++;
+            if (end <= start) return null;
+            String templateId = xml.substring(start, end);
+            return api.image("https://assetdelivery.roblox.com/v1/asset/?id=" + templateId, 585);
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static Bitmap fetchAssetThumbnail(RobloxApi api, long assetId, int size) {

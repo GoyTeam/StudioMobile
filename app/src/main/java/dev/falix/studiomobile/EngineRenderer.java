@@ -103,16 +103,21 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec3 base = uColor;\n" +
             "  if (uIsBaseplate > 0.5 && n.y > 0.5) {\n" +
             "    float camD = length(uEye - vWorld);\n" +
-            "    float fade1 = 1.0 - smoothstep(18.0, 75.0, camD);\n" +
-            "    float fade4 = 1.0 - smoothstep(65.0, 290.0, camD);\n" +
+            "    float fade1 = 1.0 - smoothstep(16.0, 82.0, camD);\n" +
+            "    float fade4 = 1.0 - smoothstep(70.0, 320.0, camD);\n" +
+            "    vec2 c4 = floor(vWorld.xz * 0.25);\n" +
+            "    float chk4 = mod(c4.x + c4.y, 2.0);\n" +
+            "    vec2 c1 = floor(vWorld.xz);\n" +
+            "    float chk1 = mod(c1.x + c1.y, 2.0);\n" +
             "    vec2 g1 = abs(fract(vWorld.xz) - 0.5);\n" +
-            "    float line1 = smoothstep(0.468, 0.496, max(g1.x, g1.y));\n" +
+            "    float line1 = smoothstep(0.472, 0.496, max(g1.x, g1.y));\n" +
             "    vec2 g4 = abs(fract(vWorld.xz * 0.25) - 0.5);\n" +
-            "    float line4 = smoothstep(0.482, 0.497, max(g4.x, g4.y));\n" +
-            "    vec2 checker = floor(vWorld.xz * 0.25);\n" +
-            "    float tileShade = mod(checker.x + checker.y, 2.0) * 0.024;\n" +
-            "    vec3 studioSlate = vec3(0.44, 0.46, 0.49);\n" +
-            "    base = studioSlate * (1.0 - line1 * 0.045 * fade1 - (line4 * 0.17 + tileShade) * fade4);\n" +
+            "    float line4 = smoothstep(0.484, 0.497, max(g4.x, g4.y));\n" +
+            "    vec3 darkTile = vec3(0.30, 0.35, 0.43);\n" +
+            "    vec3 lightTile = vec3(0.39, 0.44, 0.53);\n" +
+            "    vec3 tileCol = mix(darkTile, lightTile, mix(0.5, chk4, fade4));\n" +
+            "    tileCol *= (1.0 + (chk1 - 0.5) * 0.032 * fade1);\n" +
+            "    base = tileCol * (1.0 - line1 * 0.042 * fade1 - line4 * 0.13 * fade4);\n" +
             "  } else if (tile.w > 0.5) {\n" +
             "    base *= texture2D(uAtlas, atlasUv).rgb;\n" +
             "  }\n" +
@@ -153,8 +158,8 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);\n" +
             "  float viewDist = length(uEye - vWorld);\n" +
             "  float fog = uFogEnabled * clamp((viewDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.001), 0.0, 1.0);\n" +
-            "  float atmoHorizon = smoothstep(140.0, 480.0, viewDist) * 0.65;\n" +
-            "  vec3 finalCol = mix(col, mix(uFogColor, vec3(0.73, 0.84, 0.96), 0.55), max(fog, atmoHorizon));\n" +
+            "  float atmoHorizon = smoothstep(95.0, 420.0, viewDist) * 0.78;\n" +
+            "  vec3 finalCol = mix(col, mix(uFogColor, vec3(0.62, 0.71, 0.82), 0.65), max(fog, atmoHorizon));\n" +
             "  gl_FragColor = vec4(finalCol, uAlpha);\n" +
             "}";
 
@@ -1387,65 +1392,49 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float ws = av.isR15 ? av.widthScale : 1.0f;
         float ds = av.isR15 ? av.depthScale : 1.0f;
         float hds = av.isR15 ? av.headScale : 1.0f;
-        float speedFrac = (float) Math.min(1.0, scene.charSpeed / Math.max(1.0, scene.walkSpeed));
-        float breath = (float) Math.sin(scene.idleTime * 2.4) * 0.025f * (1f - speedFrac);
-        float landSquash = scene.landTimer > 0 ? (float) Math.sin(scene.landTimer * Math.PI / 0.18) * 0.20f : 0f;
-        float swing = (float) Math.sin(scene.charWalkPhase) * (av.isR15 ? 0.72f : 0.80f) * speedFrac;
-        float bob = (scene.onGround ? Math.abs((float) Math.sin(scene.charWalkPhase)) * 0.14f * speedFrac : 0f) + breath - landSquash;
-        float[] torsoCol = av.effectiveTorsoColor();
-        float[] lArmCol = av.effectiveLeftArmColor();
-        float[] rArmCol = av.effectiveRightArmColor();
-        float[] lLegCol = av.effectiveLeftLegColor();
-        float[] rLegCol = av.effectiveRightLegColor();
-        float[] eyeCol = {0.07f, 0.08f, 0.11f};
-        float[] shadowCol = {0.05f, 0.06f, 0.08f};
+        RobloxAnimations.Pose pose = RobloxAnimations.evaluate(
+                av.isR15, scene.onGround, scene.charSpeed, scene.walkSpeed,
+                scene.charWalkPhase, scene.idleTime, scene.landTimer, scene.charVel[1]);
+        float bob = pose.bobY;
 
+        double headYaw = yaw + pose.headYaw;
+        float hcy = (float) Math.cos(headYaw), hsy = (float) Math.sin(headYaw);
+        double torsoYaw = yaw + pose.torsoYaw;
+        float tcy = (float) Math.cos(torsoYaw), tsy = (float) Math.sin(torsoYaw);
 
-
-        // True beveled Roblox Head cylinder with composited Face texture + optional hair
+        // True beveled Roblox Head cylinder with composited Face texture + optional hair/hat
         float headY = 4.62f * hs + bob;
-        drawTexturedLimb(p, cy, sy, 0, headY, 0, 0, 0, 1.20f * hds, 1.22f * hds, 1.20f * hds, headFaceTex, light, true);
-
+        drawTexturedLimb(p, hcy, hsy, 0, headY, 0, 0, pose.headPitch, 1.20f * hds, 1.22f * hds, 1.20f * hds, headFaceTex, light, true);
+        if (av.hasHair && av.hairColor != null) {
+            charPart(p, hcy, hsy, 0, headY + 0.56f * hds, 0, 0, pose.headPitch, 1.32f * hds, 0.36f * hds, 1.32f * hds, av.hairColor, skin, light, 1);
+            charPart(p, hcy, hsy, 0, headY + 0.08f * hds, 0.50f * hds, 0, pose.headPitch, 1.28f * hds, 0.92f * hds, 0.34f * hds, av.hairColor, skin, light, 1);
+        }
 
         if (!av.isR15) {
-            // Classic Roblox R6 Rig with real UV-mapped Shirt/Pants textures
-            float armPitchL = scene.onGround ? -swing : -2.6f;
-            float armPitchR = scene.onGround ? swing : -2.6f;
-            float legPitchL = scene.onGround ? swing : 0.30f;
-            float legPitchR = scene.onGround ? -swing : -0.30f;
-            drawTexturedLimb(p, cy, sy, 0, 3.0f + bob, 0, 0, 0, 2.0f, 2.0f, 1.0f, torsoTex, light, false);
-            drawTexturedLimb(p, cy, sy, -1.5f, 4.0f + bob, 0, -1.0f, armPitchL, 1.0f, 2.0f, 1.0f, armTex, light, false);
-            drawTexturedLimb(p, cy, sy, 1.5f, 4.0f + bob, 0, -1.0f, armPitchR, 1.0f, 2.0f, 1.0f, armTex, light, false);
-            drawTexturedLimb(p, cy, sy, -0.5f, 2.0f + bob, 0, -1.0f, legPitchL, 1.0f, 2.0f, 1.0f, legTex, light, false);
-            drawTexturedLimb(p, cy, sy, 0.5f, 2.0f + bob, 0, -1.0f, legPitchR, 1.0f, 2.0f, 1.0f, legTex, light, false);
+            // Official Roblox R6 Rig & Animate keyframe poses
+            drawTexturedLimb(p, tcy, tsy, 0, 3.0f + bob, 0, 0, pose.torsoPitch, 2.0f, 2.0f, 1.0f, torsoTex, light, false);
+            drawTexturedLimb(p, tcy, tsy, -1.5f, 4.0f + bob, 0, -1.0f, pose.lUpperArmX, 1.0f, 2.0f, 1.0f, armTex, light, false);
+            drawTexturedLimb(p, tcy, tsy, 1.5f, 4.0f + bob, 0, -1.0f, pose.rUpperArmX, 1.0f, 2.0f, 1.0f, armTex, light, false);
+            drawTexturedLimb(p, cy, sy, -0.5f, 2.0f + bob, 0, -1.0f, pose.lUpperLegX, 1.0f, 2.0f, 1.0f, legTex, light, false);
+            drawTexturedLimb(p, cy, sy, 0.5f, 2.0f + bob, 0, -1.0f, pose.rUpperLegX, 1.0f, 2.0f, 1.0f, legTex, light, false);
             return;
         }
 
-        // Articulated Roblox R15 Rig (Lower/UpperTorso + jointed Upper/Lower limbs)
-        float torsoLean = speedFrac * 0.10f;
-        float armPitchL = scene.onGround ? (-swing + (float) Math.sin(scene.idleTime * 2.4) * 0.04f * (1f - speedFrac)) : -2.45f;
-        float armPitchR = scene.onGround ? (swing - (float) Math.sin(scene.idleTime * 2.4) * 0.04f * (1f - speedFrac)) : -2.45f;
-        float elbowBendL = scene.onGround ? Math.max(0f, -armPitchL) * 0.55f + 0.12f : 0.35f;
-        float elbowBendR = scene.onGround ? Math.max(0f, -armPitchR) * 0.55f + 0.12f : 0.35f;
-        float legPitchL = scene.onGround ? swing : 0.42f;
-        float legPitchR = scene.onGround ? -swing : -0.28f;
-        float kneeBendL = scene.onGround ? Math.max(0f, -legPitchL) * 0.75f + landSquash * 1.4f : 0.55f;
-        float kneeBendR = scene.onGround ? Math.max(0f, -legPitchR) * 0.75f + landSquash * 1.4f : 0.45f;
-
-        drawTexturedLimb(p, cy, sy, 0, 2.25f * hs + bob, 0, 0, torsoLean * 0.5f, 1.95f * ws, 0.65f * hs, 0.98f * ds, torsoTex, light, false);
-        drawTexturedLimb(p, cy, sy, 0, 3.25f * hs + bob, 0, 0, torsoLean, 2.02f * ws, 1.38f * hs, 1.04f * ds, torsoTex, light, false);
+        // Official Roblox R15 Rig & Animate keyframe poses (Idle, Walk, Run, Jump, Fall, Land)
+        drawTexturedLimb(p, cy, sy, 0, 2.25f * hs + bob, 0, 0, pose.torsoPitch * 0.5f, 1.95f * ws, 0.65f * hs, 0.98f * ds, torsoTex, light, false);
+        drawTexturedLimb(p, tcy, tsy, 0, 3.25f * hs + bob, 0, 0, pose.torsoPitch, 2.02f * ws, 1.38f * hs, 1.04f * ds, torsoTex, light, false);
 
         float shoulderY = 3.88f * hs + bob;
         float armX = 1.48f * ws;
         float uArmH = 0.96f * hs, lArmH = 0.96f * hs;
-        drawTexturedChain(p, cy, sy, -armX, shoulderY, 0, armPitchL, armPitchL - elbowBendL, uArmH, lArmH, 0.92f * ws, 0.92f * ds, armTex, light);
-        drawTexturedChain(p, cy, sy, armX, shoulderY, 0, armPitchR, armPitchR - elbowBendR, uArmH, lArmH, 0.92f * ws, 0.92f * ds, armTex, light);
+        drawTexturedChain(p, tcy, tsy, -armX, shoulderY, 0, pose.lUpperArmX, pose.lUpperArmX + pose.lLowerArmX, uArmH, lArmH, 0.92f * ws, 0.92f * ds, armTex, light);
+        drawTexturedChain(p, tcy, tsy, armX, shoulderY, 0, pose.rUpperArmX, pose.rUpperArmX + pose.rLowerArmX, uArmH, lArmH, 0.92f * ws, 0.92f * ds, armTex, light);
 
         float hipY = 1.94f * hs + bob;
         float legX = 0.52f * ws;
         float uLegH = 0.98f * hs, lLegH = 0.98f * hs;
-        drawTexturedChain(p, cy, sy, -legX, hipY, 0, legPitchL, legPitchL + kneeBendL, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
-        drawTexturedChain(p, cy, sy, legX, hipY, 0, legPitchR, legPitchR + kneeBendR, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
+        drawTexturedChain(p, cy, sy, -legX, hipY, 0, pose.lUpperLegX, pose.lUpperLegX + pose.lLowerLegX, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
+        drawTexturedChain(p, cy, sy, legX, hipY, 0, pose.rUpperLegX, pose.rUpperLegX + pose.rLowerLegX, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
     }
 
     private void drawLimbChain(double[] origin, float cy, float sy, float ox, float pivotY, float oz,

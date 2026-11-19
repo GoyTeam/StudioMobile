@@ -103,7 +103,7 @@ final class AvatarMesh {
 
             return parseObj(api, objText, mtlTexHashes, texCache, defaultTex);
         } catch (Throwable err) {
-            if (diag != null) diag.append("3D err: ").append(err.getClass().getSimpleName());
+            if (diag != null) diag.append("3D err: ").append(err.getClass().getSimpleName()).append(": ").append(err.getMessage());
             return null;
         }
     }
@@ -128,8 +128,13 @@ final class AvatarMesh {
     }
 
     private static String downloadCdnText(String hash) {
+        if (hash.startsWith("http://") || hash.startsWith("https://")) {
+            return tryDownloadText(hash);
+        }
         String primary = rbxCdnUrl(hash);
         String txt = tryDownloadText(primary);
+        if (txt != null) return txt;
+        txt = tryDownloadText("https://tr.rbxcdn.com/" + hash);
         if (txt != null) return txt;
         for (int s = 0; s < 8; s++) {
             String url = "https://t" + s + ".rbxcdn.com/" + hash;
@@ -137,13 +142,20 @@ final class AvatarMesh {
             txt = tryDownloadText(url);
             if (txt != null) return txt;
         }
-        return tryDownloadText("https://tr.rbxcdn.com/" + hash);
+        return null;
     }
 
     private static Bitmap downloadCdnBitmap(RobloxApi api, String hash) {
+        if (hash.startsWith("http://") || hash.startsWith("https://")) {
+            try { return api.image(hash, 512); } catch (Throwable ignored) { return null; }
+        }
         String primary = rbxCdnUrl(hash);
         try {
             Bitmap b = api.image(primary, 512);
+            if (b != null) return b;
+        } catch (Throwable ignored) { }
+        try {
+            Bitmap b = api.image("https://tr.rbxcdn.com/" + hash, 512);
             if (b != null) return b;
         } catch (Throwable ignored) { }
         for (int s = 0; s < 8; s++) {
@@ -154,7 +166,7 @@ final class AvatarMesh {
                 if (b != null) return b;
             } catch (Throwable ignored) { }
         }
-        try { return api.image("https://tr.rbxcdn.com/" + hash, 512); } catch (Throwable ignored) { return null; }
+        return null;
     }
 
     private static String tryDownloadText(String location) {
@@ -162,7 +174,7 @@ final class AvatarMesh {
             for (int r = 0; r < 5; r++) {
                 URL u = new URL(location);
                 if (!RobloxApi.imageHost(u)) return null;
-                okhttp3.Request req = new okhttp3.Request.Builder().url(location).get().build();
+                okhttp3.Request req = new okhttp3.Request.Builder().url(location).header("User-Agent", "Mozilla/5.0").get().build();
                 try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
                     if (res.code() >= 300 && res.code() < 400) {
                         String next = res.header("Location");

@@ -944,42 +944,37 @@ final class EngineTextures {
                 break;
             }
             case "SpawnPad": {
-                fill(c, 224);
+                fill(c, 236);
                 float cx = TILE_SIZE / 2f, cy = TILE_SIZE / 2f;
-                // Outer crisp border frame
+                // Subtle clean bevel border matching Roblox Studio SpawnLocation
                 PAINT.setStyle(Paint.Style.STROKE);
-                PAINT.setStrokeWidth(3.5f);
-                PAINT.setColor(Color.rgb(168, 168, 168));
-                c.drawRect(4, 4, TILE_SIZE - 4, TILE_SIZE - 4, PAINT);
-                // Official Roblox SpawnLocation 8-point starburst / sun emblem
+                PAINT.setStrokeWidth(2.5f);
+                PAINT.setColor(Color.rgb(198, 202, 210));
+                c.drawRect(3, 3, TILE_SIZE - 3, TILE_SIZE - 3, PAINT);
+                // Bold dark charcoal Roblox 8-point curved sun/starburst emblem (matches desktop Studio 1:1)
                 PAINT.setStyle(Paint.Style.FILL);
-                PAINT.setColor(Color.rgb(252, 252, 252));
-                android.graphics.Path star = new android.graphics.Path();
-                int points = 8;
-                for (int k = 0; k < points * 2; k++) {
-                    double ang = k * Math.PI / points - Math.PI / 2.0;
-                    float rad = (k % 2 == 0) ? 50f : 27f;
-                    float px = cx + (float) Math.cos(ang) * rad;
-                    float py = cy + (float) Math.sin(ang) * rad;
-                    if (k == 0) star.moveTo(px, py); else star.lineTo(px, py);
+                PAINT.setColor(Color.rgb(34, 38, 46));
+                int rays = 8;
+                for (int k = 0; k < rays; k++) {
+                    double a0 = k * (2.0 * Math.PI / rays);
+                    double aMid = a0 + 0.16;
+                    double aTip = a0 + 0.34;
+                    double a1 = a0 + (2.0 * Math.PI / rays) * 0.52;
+                    android.graphics.Path ray = new android.graphics.Path();
+                    ray.moveTo(cx + (float) Math.cos(a0) * 20f, cy + (float) Math.sin(a0) * 20f);
+                    ray.quadTo(cx + (float) Math.cos(aMid) * 38f, cy + (float) Math.sin(aMid) * 38f,
+                               cx + (float) Math.cos(aTip) * 56f, cy + (float) Math.sin(aTip) * 56f);
+                    ray.quadTo(cx + (float) Math.cos(a1) * 34f, cy + (float) Math.sin(a1) * 34f,
+                               cx + (float) Math.cos(a1) * 20f, cy + (float) Math.sin(a1) * 20f);
+                    ray.close();
+                    c.drawPath(ray, PAINT);
                 }
-                star.close();
-                c.drawPath(star, PAINT);
-                PAINT.setStyle(Paint.Style.STROKE);
-                PAINT.setStrokeWidth(3.2f);
-                PAINT.setColor(Color.rgb(138, 138, 138));
-                c.drawPath(star, PAINT);
-                // Inner Roblox Spawn circle
+                // Crisp ring around bright center circle
                 PAINT.setStyle(Paint.Style.FILL);
-                PAINT.setColor(Color.rgb(236, 236, 236));
-                c.drawCircle(cx, cy, 20f, PAINT);
-                PAINT.setStyle(Paint.Style.STROKE);
-                PAINT.setStrokeWidth(4.5f);
-                PAINT.setColor(Color.rgb(112, 112, 112));
-                c.drawCircle(cx, cy, 19f, PAINT);
-                PAINT.setStyle(Paint.Style.FILL);
-                PAINT.setColor(Color.rgb(255, 255, 255));
-                c.drawCircle(cx, cy, 9.5f, PAINT);
+                PAINT.setColor(Color.rgb(34, 38, 46));
+                c.drawCircle(cx, cy, 24f, PAINT);
+                PAINT.setColor(Color.rgb(236, 238, 242));
+                c.drawCircle(cx, cy, 17.5f, PAINT);
                 break;
             }
             default: {
