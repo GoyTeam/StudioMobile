@@ -97,8 +97,17 @@ public final class RobloxApi {
     private void collectUniverseIds(Object node,Set<Long> ids) {
         if(node instanceof JSONObject){JSONObject o=(JSONObject)node;Iterator<String> keys=o.keys();while(keys.hasNext()){
             String k=keys.next();Object v=o.opt(k);
-            if("universeId".equals(k)){try{long id=Long.parseLong(String.valueOf(v));if(id>0)ids.add(id);}catch(Exception ignored){}}
+            if("universeId".equals(k)||"targetId".equals(k)){try{long id=Long.parseLong(String.valueOf(v));if(id>0)ids.add(id);}catch(Exception ignored){}}
             else if("universeIds".equals(k)&&v instanceof JSONArray){JSONArray a=(JSONArray)v;for(int i=0;i<a.length();i++)try{long id=Long.parseLong(a.optString(i));if(id>0)ids.add(id);}catch(Exception ignored){}}
+            else if(v instanceof String){
+                String s=(String)v;
+                int idx=s.indexOf("universes/");
+                if(idx>=0){
+                    String rest=s.substring(idx+10);
+                    int end=0;while(end<rest.length()&&Character.isDigit(rest.charAt(end)))end++;
+                    if(end>0)try{long id=Long.parseLong(rest.substring(0,end));if(id>0)ids.add(id);}catch(Exception ignored){}
+                }
+            }
             else if(v instanceof JSONObject||v instanceof JSONArray)collectUniverseIds(v,ids);
         }} else if(node instanceof JSONArray){JSONArray a=(JSONArray)node;for(int i=0;i<a.length();i++)collectUniverseIds(a.opt(i),ids);}
     }
@@ -122,6 +131,39 @@ public final class RobloxApi {
                 if(!cursor.isEmpty()&&!cursors.add(cursor))throw new IOException("Roblox returned a repeated pagination cursor.");
             } while(!cursor.isEmpty());
         } catch(Exception e){result.warnings.add("Public listing incomplete: "+safe(e));}
+        // Automatically discover group experiences the user belongs to (owner / dev roles first)
+        try {
+            JSONArray groups=json("https://groups.roblox.com/v1/users/"+s.userId+"/groups/roles",null,null).optJSONArray("data");
+            if(groups!=null){
+                int fetchedGroups=0;
+                for(int i=0;i<groups.length()&&fetchedGroups<12;i++){
+                    JSONObject entry=groups.optJSONObject(i);
+                    if(entry==null)continue;
+                    JSONObject grp=entry.optJSONObject("group");
+                    JSONObject role=entry.optJSONObject("role");
+                    if(grp==null)continue;
+                    long gid=grp.optLong("id",0);
+                    int rank=role==null?0:role.optInt("rank",0);
+                    if(gid<=0||rank<10)continue;
+                    String gname=grp.optString("name","Group");
+                    fetchedGroups++;
+                    try {
+                        JSONObject gp=json("https://games.roblox.com/v2/groups/"+gid+"/games?accessFilter=2&limit=50&sortOrder=Desc",null,null);
+                        JSONArray gdata=gp.optJSONArray("data");
+                        if(gdata!=null)for(int j=0;j<gdata.length();j++){
+                            JSONObject o=gdata.getJSONObject(j);
+                            JSONObject root=o.optJSONObject("rootPlace");
+                            long uid=o.getLong("id");
+                            if(!map.containsKey(uid)){
+                                Experience e=new Experience(uid,o.optString("name")+" · "+gname,root==null?0:root.optLong("id",0));
+                                e.visibility="Group";
+                                map.put(e.id,e);
+                            }
+                        }
+                    } catch(Exception ignored) {}
+                }
+            }
+        } catch(Exception ignored) {}
         Set<Long> scoped=new LinkedHashSet<>();collectUniverseIds(s.introspection,scoped);scoped.addAll(manual);
         for(long id:scoped)try{map.put(id,universe(s,id));}catch(Exception e){result.warnings.add("Universe "+id+": "+safe(e));}
         // Metadata requests are limited to explicitly scoped / manually added IDs, avoiding unnecessary key use.

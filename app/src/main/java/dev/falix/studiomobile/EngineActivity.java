@@ -104,6 +104,7 @@ public final class EngineActivity extends Activity {
         try {
             setContentView(build());
             applyCutoutPadding();
+            loadAvatarAsync();
             load();
         } catch (Throwable failure) {
             // Constructing the editor must never take the whole app down: show the cause instead.
@@ -215,7 +216,8 @@ public final class EngineActivity extends Activity {
         android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
         float density = metrics.density <= 0 ? 1 : metrics.density;
         int widthDp = (int) (metrics.widthPixels / density);
-        narrowScreen = widthDp < 720;
+        int heightDp = (int) (metrics.heightPixels / density);
+        narrowScreen = Math.min(widthDp, heightDp) < 600;
         explorerWidth = narrowScreen ? Math.min(dp(250), (int) (metrics.widthPixels * 0.42f)) : dp(232);
         propertiesWidth = narrowScreen ? Math.min(dp(265), (int) (metrics.widthPixels * 0.46f)) : dp(264);
 
@@ -407,20 +409,21 @@ public final class EngineActivity extends Activity {
         viewportLayer.addView(viewport, new FrameLayout.LayoutParams(-1, -1));
 
         toolStrip = row();
+        toolStrip.setGravity(Gravity.CENTER_VERTICAL);
         toolStrip.setPadding(dp(4), dp(3), dp(4), dp(3));
-        toolStrip.setBackground(shape(0xcc23272f, 8));
-        int toolSize = dp(40);
-        toolStrip.addView(toolButton("select", "arrow", "Select"), lp(toolSize, toolSize));
-        toolStrip.addView(toolButton("move", "move", "Move tool"), lp(toolSize, toolSize));
-        toolStrip.addView(toolButton("rotate", "rotate", "Rotate tool"), lp(toolSize, toolSize));
-        toolStrip.addView(toolButton("scale", "scale", "Scale tool"), lp(toolSize, toolSize));
-        toolStrip.addView(toolButton("grab", "hand", "Grab tool: drag parts to move them"), lp(toolSize, toolSize));
-        toolStrip.addView(toolButton("snap", "grid", "Grid snapping"), lp(toolSize, toolSize));
-        toolStrip.addView(line(), margin(dp(3), dp(6), dp(1), dp(26)));
-        toolStrip.addView(toolButton("insert", "cube", "Insert object"), lp(toolSize, toolSize));
-        toolStrip.addView(toolButton("duplicate", "copy", "Duplicate"), lp(toolSize, toolSize));
-        toolStrip.addView(toolButton("delete", "trash", "Delete"), lp(toolSize, toolSize));
-        toolStrip.addView(toolButton("focus", "search", "Focus selection"), lp(toolSize, toolSize));
+        toolStrip.setBackground(shape(0xe01c212c, 10));
+        int toolW = dp(44), toolH = dp(40);
+        toolStrip.addView(toolButton("select", "arrow", "Select"), lp(toolW, toolH));
+        toolStrip.addView(toolButton("move", "move", "Move"), lp(toolW, toolH));
+        toolStrip.addView(toolButton("rotate", "rotate", "Rotate"), lp(toolW, toolH));
+        toolStrip.addView(toolButton("scale", "scale", "Scale"), lp(toolW, toolH));
+        toolStrip.addView(toolButton("grab", "hand", "Grab"), lp(toolW, toolH));
+        toolStrip.addView(toolButton("snap", "grid", "Snap"), lp(toolW, toolH));
+        toolStrip.addView(line(), margin(dp(3), dp(6), dp(1), dp(24)));
+        toolStrip.addView(toolButton("insert", "cube", "Insert"), lp(toolW, toolH));
+        toolStrip.addView(toolButton("duplicate", "copy", "Copy"), lp(toolW, toolH));
+        toolStrip.addView(toolButton("delete", "trash", "Delete"), lp(toolW, toolH));
+        toolStrip.addView(toolButton("focus", "search", "Focus"), lp(toolW, toolH));
         // The strip scrolls instead of shrinking, so no button is ever squeezed on a phone.
         HorizontalScrollView toolScroll = new HorizontalScrollView(this);
         toolScroll.setHorizontalScrollBarEnabled(false);
@@ -430,7 +433,9 @@ public final class EngineActivity extends Activity {
         toolParams.setMargins(dp(8), dp(8), dp(8), 0);
         viewportLayer.addView(toolScroll, toolParams);
 
-        viewportLayer.addView(buildFlyControls(), new FrameLayout.LayoutParams(-1, -1));
+        FrameLayout.LayoutParams flyLp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.LEFT);
+        flyLp.setMargins(dp(12), 0, 0, dp(12));
+        viewportLayer.addView(buildFlyControls(), flyLp);
 
         flySpeedPill = text("Fly x1", 11, true, 0xffffffff);
         flySpeedPill.setPadding(dp(11), dp(6), dp(11), dp(6));
@@ -475,11 +480,12 @@ public final class EngineActivity extends Activity {
             if (scene.playing) { scene.moveX = x; scene.moveZ = y; }
             else { scene.flyX = x; scene.flyZ = y; }
         });
-        layer.addView(joystick, lp(dp(128), dp(128)));
+        layer.setGravity(Gravity.BOTTOM);
+        layer.addView(joystick, lp(dp(94), dp(94)));
         liftPad = new JoystickView(this);
         liftPad.setContentDescription("Camera up and down");
         liftPad.setListener((x, y) -> { if (!scene.playing) scene.flyUp = y; });
-        layer.addView(liftPad, margin(dp(10), 0, dp(58), dp(128)));
+        layer.addView(liftPad, margin(dp(8), 0, dp(42), dp(94)));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.LEFT);
         params.setMargins(dp(14), 0, 0, dp(14));
         layer.setLayoutParams(params);
@@ -727,6 +733,16 @@ public final class EngineActivity extends Activity {
     }
 
     // ------------------------------------------------------------------ loading
+    private void loadAvatarAsync() {
+        final long uid = getSharedPreferences("settings", MODE_PRIVATE).getLong("lastUserId", 0);
+        final String uname = getSharedPreferences("settings", MODE_PRIVATE).getString("lastUsername", "Player");
+        if (uid <= 0) return;
+        worker.execute(() -> {
+            AvatarProfile av = AvatarProfile.fetchForUser(new RobloxApi(), uid, uname);
+            scene.avatar = av;
+        });
+    }
+
     private void load() {
         if (placeUri == null) { fail("No place file was supplied."); return; }
         subtitle.setText("Decoding place…");
@@ -837,7 +853,7 @@ public final class EngineActivity extends Activity {
         row.setBackground(selected ? shape(SOFT, 6) : null);
         if (!node.children.isEmpty()) {
             boolean open = expanded.contains(node) && !collapsed.contains(node);
-            View chevron = iconButton(open ? "chevron" : "arrow", open ? "Collapse" : "Expand", () -> {
+            View chevron = iconButton(open ? "chevron" : "chevron_right", open ? "Collapse" : "Expand", () -> {
                 if (open) { collapsed.add(node); expanded.remove(node); } else { expanded.add(node); collapsed.remove(node); }
                 buildTree();
             });
@@ -1473,12 +1489,16 @@ public final class EngineActivity extends Activity {
     }
 
     // ------------------------------------------------------------------ tools
-    private View toolButton(String id, String icon, String description) {
-        FrameLayout button = new FrameLayout(this);
-        boolean active = tool.equals(id);
-        button.setBackground(active ? shape(ACCENT, 6) : shape(0x00000000, 6));
-        button.setContentDescription(description);
-        button.addView(new StudioIcon(this, icon, active ? 0xffffffff : 0xffd0d6e0), new FrameLayout.LayoutParams(dp(15), dp(15), Gravity.CENTER));
+    private View toolButton(String id, String icon, String label) {
+        LinearLayout button = col();
+        button.setGravity(Gravity.CENTER);
+        boolean active = "snap".equals(id) ? snap : tool.equals(id);
+        button.setBackground(active ? shape(ACCENT, 7) : shape(0x00000000, 7));
+        button.setContentDescription(label);
+        button.addView(new StudioIcon(this, icon, active ? 0xffffffff : 0xffd2d9e6), lp(dp(15), dp(15)));
+        TextView lbl = text(label, 8.5f, active, active ? 0xffffffff : 0xff9aa6bc);
+        lbl.setSingleLine(true);
+        button.addView(lbl, margin(0, dp(2), -2, -2));
         button.setOnClickListener(v -> toolAction(id));
         return button;
     }
@@ -1523,17 +1543,20 @@ public final class EngineActivity extends Activity {
             LinearLayout strip = toolStrip;
             String[] ids = {"select", "move", "rotate", "scale", "grab", "snap", null, "insert", "duplicate", "delete", "focus"};
             String[] icons = {"arrow", "move", "rotate", "scale", "hand", "grid", null, "cube", "copy", "trash", "search"};
-            String[] descriptions = {"Select", "Move tool", "Rotate tool", "Scale tool", "Grab tool", "Grid snapping", null, "Insert object", "Duplicate", "Delete", "Focus selection"};
+            String[] labels = {"Select", "Move", "Rotate", "Scale", "Grab", snap ? PlaceWriter.num(scene.gridSnap) + "s" : "Snap", null, "Insert", "Copy", "Delete", "Focus"};
             for (int i = 0; i < strip.getChildCount() && i < ids.length; i++) {
                 View child = strip.getChildAt(i);
-                if (!(child instanceof FrameLayout) || ids[i] == null) continue;
+                if (!(child instanceof LinearLayout) || ids[i] == null) continue;
                 boolean active = ids[i].equals("snap") ? snap : tool.equals(ids[i]);
-                child.setBackground(active ? shape(ACCENT, 6) : shape(0x00000000, 6));
-                ((FrameLayout) child).removeAllViews();
-                ((FrameLayout) child).addView(new StudioIcon(this, icons[i], active ? 0xffffffff : 0xffd0d6e0), new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER));
-                ((FrameLayout) child).setContentDescription(descriptions[i]);
+                child.setBackground(active ? shape(ACCENT, 7) : shape(0x00000000, 7));
+                LinearLayout box = (LinearLayout) child;
+                box.removeAllViews();
+                box.addView(new StudioIcon(this, icons[i], active ? 0xffffffff : 0xffd2d9e6), lp(dp(15), dp(15)));
+                TextView lbl = text(labels[i], 8.5f, active, active ? 0xffffffff : 0xff9aa6bc);
+                lbl.setSingleLine(true);
+                box.addView(lbl, margin(0, dp(2), -2, -2));
                 final String id = ids[i];
-                child.setOnClickListener(v -> toolAction(id));
+                box.setOnClickListener(v -> toolAction(id));
             }
         }
     }

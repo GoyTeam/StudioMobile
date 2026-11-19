@@ -46,8 +46,15 @@ final class EngineScene {
     boolean onGround;
     double walkSpeed = 16, jumpPower = 50, gravity = 196.2;
     double charHx = 1, charHy = 2.5, charHz = 1;
+    volatile AvatarProfile avatar = AvatarProfile.defaultAvatar();
     volatile double charHealth = 100, charMaxHealth = 100;
     volatile double charWalkPhase = 0, charSpeed = 0;
+    volatile double idleTime = 0, landTimer = 0;
+    private double coyoteTimer = 0, jumpBufferTimer = 0;
+    private boolean wasOnGround = false;
+    private Instance standingPart;
+    private final double[] standingPartPrev = new double[3];
+    private final HashMap<Instance, Double> partVelY = new HashMap<>();
     volatile double moveX, moveZ;
     volatile boolean jumpQueued;
     double renderYaw = Double.NaN;
@@ -371,6 +378,13 @@ final class EngineScene {
         charHealth = charMaxHealth = 100;
         charWalkPhase = 0;
         charSpeed = 0;
+        idleTime = 0;
+        landTimer = 0;
+        coyoteTimer = 0;
+        jumpBufferTimer = 0;
+        wasOnGround = false;
+        standingPart = null;
+        partVelY.clear();
         charVel[0] = charVel[1] = charVel[2] = 0;
         moveX = moveZ = 0;
         onGround = false;
@@ -431,6 +445,25 @@ final class EngineScene {
     synchronized void step(double dt) {
         if (!playing) return;
         dt = Math.min(dt, 0.05);
+        idleTime += dt;
+        if (landTimer > 0) landTimer = Math.max(0, landTimer - dt);
+
+        // Moving platform carry
+        if (onGround && standingPart != null && standingPart.parent != null) {
+            double[] pc = standingPart.cframe();
+            double dx = pc[0] - standingPartPrev[0];
+            double dy = pc[1] - standingPartPrev[1];
+            double dz = pc[2] - standingPartPrev[2];
+            if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > 1e-6 && Math.abs(dx) < 20 && Math.abs(dy) < 20 && Math.abs(dz) < 20) {
+                charPos[0] += dx;
+                charPos[1] += dy;
+                charPos[2] += dz;
+            }
+            standingPartPrev[0] = pc[0];
+            standingPartPrev[1] = pc[1];
+            standingPartPrev[2] = pc[2];
+        }
+
         double speed = walkSpeed;
         double wishX = 0, wishZ = 0;
         double len = Math.min(1, Math.hypot(moveX, moveZ));
@@ -440,11 +473,12 @@ final class EngineScene {
             wishZ = (-sy * moveX - cy * moveZ) * speed * len;
             charYaw = Math.atan2(wishX, wishZ);
         }
-        charVel[0] = wishX;
-        charVel[2] = wishZ;
-        charSpeed = Math.hypot(wishX, wishZ);
-        if (charSpeed > 0.2 && onGround) {
-            charWalkPhase += dt * (charSpeed * 0.55);
+        double accel = onGround ? 18.0 : 8.5;
+        charVel[0] += (wishX - charVel[0]) * Math.min(1.0, dt * accel);
+        charVel[2] += (wishZ - charVel[2]) * Math.min(1.0, dt * accel);
+        charSpeed = Math.hypot(charVel[0], charVel[2]);
+        if (charSpeed > 0.25 && onGround) {
+            charWalkPhase += dt * (charSpeed * 0.56);
         } else if (onGround) {
             charWalkPhase *= Math.max(0, 1.0 - dt * 10.0);
         }
@@ -456,16 +490,36 @@ final class EngineScene {
             renderYaw += diff * Math.min(1.0, dt * 14.0);
         }
 
+        if (onGround) coyoteTimer = 0.12;
+        else coyoteTimer = Math.max(0, coyoteTimer - dt);
+
+        if (jumpQueued) {
+            jumpBufferTimer = 0.12;
+            jumpQueued = false;
+        } else {
+            jumpBufferTimer = Math.max(0, jumpBufferTimer - dt);
+        }
+
         charVel[1] -= gravity * dt;
-        if (jumpQueued && onGround) { charVel[1] = jumpPower; onGround = false; }
-        jumpQueued = false;
+        if (jumpBufferTimer > 0 && coyoteTimer > 0) {
+            charVel[1] = jumpPower;
+            onGround = false;
+            coyoteTimer = 0;
+            jumpBufferTimer = 0;
+            standingPart = null;
+        }
         if (charVel[1] < -300) charVel[1] = -300;
 
         touchedNow.clear();
+        wasOnGround = onGround;
         onGround = false;
+        standingPart = null;
         moveAxis(0, charVel[0] * dt);
         moveAxis(2, charVel[2] * dt);
         moveAxis(1, charVel[1] * dt);
+        if (onGround && !wasOnGround) landTimer = 0.18;
+
+        stepDynamicParts(dt);
 
         if (luaRuntime != null && luaRuntime.isRunning()) {
             for (Instance part : touchedNow) {
@@ -479,6 +533,37 @@ final class EngineScene {
         if (charPos[1] < -150) respawnCharacter();
     }
 
+    private void stepDynamicParts(double dt) {
+        boolean anyMoved = false;
+        for (int i = 0; i < renderList.size(); i++) {
+            Instance part = renderList.get(i);
+            if (part.getBool("Anchored", true)) continue;
+            if ("SpawnLocation".equals(part.className)) continue;
+            double vy = partVelY.containsKey(part) ? partVelY.get(part) : 0.0;
+            vy = Math.max(-220.0, vy - gravity * dt);
+            double[] c = part.cframe();
+            double[] s = part.size();
+            double halfY = Math.abs(s[1]) * 0.5;
+            double nextY = c[1] + vy * dt;
+            double[] boxSelf = {c[0], nextY, c[2], Math.abs(s[0]) * 0.5, halfY, Math.abs(s[2]) * 0.5};
+            for (int j = 0; j < colliders.size(); j++) {
+                if (colliderOwners.get(j) == part) continue;
+                double[] other = colliders.get(j);
+                if (overlaps(boxSelf, other) && vy < 0 && c[1] >= other[1]) {
+                    nextY = other[1] + other[4] + halfY;
+                    vy = 0;
+                    break;
+                }
+            }
+            if (Math.abs(nextY - c[1]) > 1e-4) {
+                part.setPosition(c[0], nextY, c[2]);
+                anyMoved = true;
+            }
+            partVelY.put(part, vy);
+        }
+        if (anyMoved) markDirty();
+    }
+
     void moveAxis(int axis, double delta) {
         if (delta == 0) return;
         charPos[axis] += delta;
@@ -486,14 +571,36 @@ final class EngineScene {
         for (int i = 0; i < colliders.size(); i++) {
             double[] box = colliders.get(i);
             if (!overlaps(self, box)) continue;
-            if (i < colliderOwners.size()) touchedNow.add(colliderOwners.get(i));
+            Instance owner = i < colliderOwners.size() ? colliderOwners.get(i) : null;
+            if (owner != null) touchedNow.add(owner);
+            // Roblox-style automatic step-up for low ledges (<= 1.25 studs)
+            if (axis != 1 && wasOnGround) {
+                double stepHeight = (box[1] + box[4]) - (charPos[1] - charHy);
+                if (stepHeight > 0 && stepHeight <= 1.25) {
+                    charPos[1] += stepHeight + 0.02;
+                    self[1] = charPos[1];
+                    continue;
+                }
+            }
             double comp = axis == 0 ? self[3] + box[3] : axis == 1 ? self[4] + box[4] : self[5] + box[5];
             double dist = charPos[axis] - box[axis];
             if (dist > 0) charPos[axis] = box[axis] + comp;
             else charPos[axis] = box[axis] - comp;
             self[axis] = charPos[axis];
             if (axis == 1) {
-                if (delta < 0) { onGround = true; charVel[1] = 0; } else charVel[1] = Math.min(0, charVel[1]);
+                if (delta < 0) {
+                    onGround = true;
+                    charVel[1] = 0;
+                    if (owner != null) {
+                        standingPart = owner;
+                        double[] pc = owner.cframe();
+                        standingPartPrev[0] = pc[0];
+                        standingPartPrev[1] = pc[1];
+                        standingPartPrev[2] = pc[2];
+                    }
+                } else {
+                    charVel[1] = Math.min(0, charVel[1]);
+                }
             }
         }
     }

@@ -312,7 +312,7 @@ final class LuaRuntime {
     }
 
     Object executeScript(Instance scriptInst, String source) {
-        boolean wasRunning = running;
+        boolean prevRunning = running;
         running = true;
         try {
             List<Token> tokens = tokenize(source);
@@ -329,7 +329,7 @@ final class LuaRuntime {
             String msg = err.getMessage() == null ? err.getClass().getSimpleName() : err.getMessage();
             log("error", "[" + scriptInst.name + "] " + msg);
         } finally {
-            if (!wasRunning) running = false;
+            running = prevRunning;
         }
         return null;
     }

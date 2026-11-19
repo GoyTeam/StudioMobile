@@ -36,6 +36,9 @@ final class ScriptEditorView extends LinearLayout {
         setOrientation(VERTICAL);
         setBackgroundColor(0xFF141821);
 
+        titleView = makeText(ctx, "Script", 12.5f, true, 0xFFF1F5FC);
+        statsView = makeText(ctx, "Luau · 1 line", 10f, false, 0xFF8C97AB);
+
         codeField = new EditText(ctx);
         codeField.setBackgroundColor(0xFF141821);
         codeField.setTextColor(0xFFE6ECF7);
@@ -68,8 +71,6 @@ final class ScriptEditorView extends LinearLayout {
         LinearLayout titles = new LinearLayout(ctx);
         titles.setOrientation(VERTICAL);
         titles.setPadding(dp(8), 0, dp(8), 0);
-        titleView = makeText(ctx, "Script", 12.5f, true, 0xFFF1F5FC);
-        statsView = makeText(ctx, "Luau · 1 line", 10f, false, 0xFF8C97AB);
         titles.addView(titleView);
         titles.addView(statsView);
         top.addView(titles, new LayoutParams(0, -2, 1));

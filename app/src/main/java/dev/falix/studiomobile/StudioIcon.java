@@ -21,6 +21,7 @@ final class StudioIcon extends View {
             case "check":path(canvas,new float[]{5,12,10,17,20,6});break;
             case "arrow":path(canvas,new float[]{14,5,7,12,14,19});canvas.drawLine(7,12,21,12,paint);break;
             case "chevron":path(canvas,new float[]{7,9,12,14,17,9});break;
+            case "chevron_right":path(canvas,new float[]{9,7,14,12,9,17});break;
             case "cloud":path(canvas,new float[]{6,18,4,18,2,15,3,11,7,10,8,6,13,4,18,7,19,10,22,12,22,16,20,18,17,18});canvas.drawLine(12,11,12,21,paint);path(canvas,new float[]{9,18,12,21,15,18});break;
             case "file":path(canvas,new float[]{5,2,15,2,20,7,20,22,5,22,5,2});path(canvas,new float[]{15,2,15,7,20,7});canvas.drawLine(9,12,16,12,paint);canvas.drawLine(9,16,16,16,paint);break;
             case "refresh":canvas.drawArc(new RectF(4,4,20,20),45,285,false,paint);path(canvas,new float[]{20,3,20,9,14,9});break;

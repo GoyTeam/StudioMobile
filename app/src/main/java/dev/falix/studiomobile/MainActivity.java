@@ -61,7 +61,7 @@ public final class MainActivity extends Activity {
     @Override public void onConfigurationChanged(android.content.res.Configuration c){super.onConfigurationChanged(c);if("system".equals(prefs.getString("appearance","system"))){lastAnimatedRoute="";if(guideWindow!=null)guideWindow.dismiss();render();}}
     void applySafeInsets(View view){if(Build.VERSION.SDK_INT>=35){view.setOnApplyWindowInsetsListener((v,insets)->{android.graphics.Insets bars=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());v.setPadding(bars.left,bars.top,bars.right,bars.bottom);return insets;});view.requestApplyInsets();}}
     void restore(){busy=true;render();int token=epoch;worker.execute(()->{try{String key=vault.load();if(key==null){runOnUiThread(()->{if(token==epoch){busy=false;render();}});return;}RobloxApi.Session s=api.login(key);runOnUiThread(()->{if(token==epoch)connected(s);});}catch(Exception e){runOnUiThread(()->{if(token==epoch){busy=false;loginError="Saved connection could not be verified. "+RobloxApi.safe(e);render();}});}});}
-    void connected(RobloxApi.Session s){session=s;busy=false;loginError="";screen="home";render();scan();refreshCloud();}
+    void connected(RobloxApi.Session s){session=s;if(s!=null)prefs.edit().putLong("lastUserId",s.userId).putString("lastUsername",s.username).apply();busy=false;loginError="";screen="home";render();scan();refreshCloud();}
     void navigate(String next){screen=next;render();if(next.equals("projects")||next.equals("home"))scan();if(next.equals("cloud")&&session!=null&&listing==null&&!loadingCloud)refreshCloud();}
     void render(){
         if(isFinishing())return;
@@ -108,7 +108,7 @@ public final class MainActivity extends Activity {
         TextView create=text("+  New project",12,true,ON_BLUE);create.setGravity(Gravity.CENTER);create.setMinimumHeight(dp(36));create.setBackground(new RippleDrawable(android.content.res.ColorStateList.valueOf(0x44333333),shape(PRIMARY,10,false),null));create.setOnClickListener(v->navigate("new-project"));UiMotion.press(create);side.addView(create,new LinearLayout.LayoutParams(-1,dp(36)));gap(side,12);
         navItem(side,"Home","home","home");navItem(side,"Projects","folder","projects");
         side.addView(new View(this),new LinearLayout.LayoutParams(1,0,1));
-        TextView label=text("0.7.0  •  STUDIO",9,true,MUTED);label.setPadding(dp(8),0,0,dp(4));side.addView(label);
+        TextView label=text("0.8.0  •  STUDIO",9,true,MUTED);label.setPadding(dp(8),0,0,dp(4));side.addView(label);
         TextView status=text(session==null?"Local workspace":"@"+session.username+" connected",10,false,MUTED);status.setPadding(dp(8),0,0,0);side.addView(status);
         View edge=new View(this);edge.setBackgroundColor(BORDER);body.addView(edge,new LinearLayout.LayoutParams(dp(1),-1));
     }
@@ -164,7 +164,7 @@ public final class MainActivity extends Activity {
         LinearLayout banner=card(content,SOFT,20);LinearLayout row=horizontal();row.setGravity(Gravity.CENTER_VERTICAL);LinearLayout words=vertical();row.addView(words,new LinearLayout.LayoutParams(0,-2,1));addText(words,session==null?"Bring your projects to mobile":"Your creator account is connected",17,true,INK,5);addText(words,session==null?"Connect Roblox to browse experiences, or import a place file you already own.":"Browse accessible experiences and download authorized place files to your workspace.",14,false,MUTED,0);TextView action=button(session==null?"Connect Roblox":"Browse experiences",true,()->navigate(session==null?"login":"cloud"));LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(-2,-2);ap.leftMargin=dp(18);row.addView(action,ap);banner.addView(row);
         section("Recent projects","View all",()->navigate("projects"));int managedRecent=0;for(ManagedProjects.Record r:managed)if(prefs.contains("managedRecent:"+r.data.optString("id"))){projectUi.row(r);if(++managedRecent==3)break;}ArrayList<ProjectStore.Project> recent=store.recent(local);
         if(recent.isEmpty()&&managedRecent==0)empty("clock","No recent projects yet","Create a project or import a place file.","+  Go to Projects",()->navigate("projects"));else{int n=0;for(ProjectStore.Project p:recent){localRow(p);if(++n==3)break;}}
-        gap(content,14);section("Engine beta","API key guide",()->guide());LinearLayout notes=card(content,CANVAS,0);addText(notes,"0.7.0  /  Full Mobile Studio on device",14.5f,true,INK,5);addText(notes,"Open any place → Edit for the 3D viewport (Block, Ball, Cylinder, Wedge + frustum culling), Explorer, Properties, Toolbox prefabs, Luau Script Editor, live Output & Command Bar, and animated playtesting with StarterGui.",12.5f,false,MUTED,0);
+        gap(content,14);section("Engine beta","API key guide",()->guide());LinearLayout notes=card(content,CANVAS,0);addText(notes,"0.8.0  /  Full Mobile Studio on device",14.5f,true,INK,5);addText(notes,"Open any place → Edit for the 3D viewport (Block, Ball, Cylinder, Wedge + frustum culling), Explorer, Properties, Toolbox prefabs, Luau Script Editor, live Output & Command Bar, and animated playtesting with StarterGui.",12.5f,false,MUTED,0);
         if(!storageError.isEmpty())notice(storageError);
     }
     void section(String title,String action,Runnable fn){LinearLayout row=horizontal();row.setGravity(Gravity.CENTER_VERTICAL);row.addView(text(title,15,true,INK));spacer(row);TextView a=button(action,false,fn);a.setTextSize(11);row.addView(a);LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.bottomMargin=dp(10);content.addView(row,p);}
@@ -190,7 +190,7 @@ public final class MainActivity extends Activity {
     void cloudPage(){title("Import from Roblox","Download place files that your API key is allowed to access.");
         if(session==null){empty("cloud","Connect your creator account","Connect with your creator API key.","Connect Roblox",()->navigate("login"));return;}
         LinearLayout controls=horizontal();controls.setGravity(Gravity.CENTER_VERTICAL);controls.addView(button("Add universe ID",true,()->addUniverse()));marginAdd(controls,button("API key guide",false,()->guide()),8,0);spacer(controls);controls.addView(iconAction("refresh","Refresh Roblox experiences",()->refreshCloud()),new LinearLayout.LayoutParams(dp(44),dp(44)));content.addView(controls);gap(content,12);
-        notice("Discovery is limited: public user-owned experiences plus accessible scoped/manual universe IDs. Private and group experiences may be missing. Unknown visibility is never labeled Private.");
+        notice("Auto-discovers your public experiences, group experiences, and Open Cloud scoped universes automatically. You can still add any private universe ID manually.");
         if(!session.canDownload())notice("This key does not declare legacy-asset:manage. Browsing can still work; reconnect with that permission to enable downloads.");
         if(loadingCloud)loading(content,"Fetching experiences from Roblox…");
         if(!cloudError.isEmpty())notice(cloudError);

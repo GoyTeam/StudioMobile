@@ -89,10 +89,13 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  if (tile.w > 0.5) base *= texture2D(uAtlas, atlasUv).rgb;\n" +
             "  float assetMask = (uAssetFace < -0.5 || abs(uAssetFace - vFace) < 0.5) ? uHasAsset : 0.0;\n" +
             "  if (assetMask > 0.0) base = mix(base, texture2D(uAsset, faceUv * uAssetTiles).rgb, assetMask);\n" +
-            "  vec3 ambient = mix(uAmbient * 0.55, uAmbient, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));\n" +
+            "  float hemi = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);\n" +
+            "  vec3 skyFill = max(uAmbient, vec3(0.28, 0.31, 0.36));\n" +
+            "  vec3 ambient = mix(skyFill * 0.62, skyFill * 1.12, hemi);\n" +
             "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
-            "  vec3 light = ambient + uSunColor * ndl * uSunGain;\n" +
-            "  light += uShiftTop * ndl * 0.5 + uShiftBottom * (1.0 - ndl) * 0.5;\n" +
+            "  float wrap = max((dot(n, uSunDir) + 0.25) / 1.25, 0.0);\n" +
+            "  vec3 light = ambient + uSunColor * (ndl * 0.88 + wrap * 0.14) * uSunGain;\n" +
+            "  light += uShiftTop * ndl * 0.45 + uShiftBottom * (1.0 - ndl) * 0.35;\n" +
             "  for (int i = 0; i < 4; i++) {\n" +
             "    float used = i < uLightCount ? 1.0 : 0.0;\n" +
             "    vec3 toLight = uLightPos[i] - vWorld;\n" +
@@ -116,8 +119,10 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec3 hv = normalize(view + uSunDir);\n" +
             "  float spec = pow(max(dot(n, hv), 0.0), uShininess) * (1.0 - uRough * 0.5);\n" +
             "  vec3 specColour = mix(vec3(0.04), base, uMetal);\n" +
-            "  vec3 col = base * light * (1.0 - uMetal * 0.6) + specColour * spec * uSpecular * (uSunGain * 1.1 + 0.2)\n" +
-            "           + base * uEmissive * 1.35;\n" +
+            "  float fresnel = pow(1.0 - max(dot(n, view), 0.0), 4.0) * (1.0 - uRough * 0.65);\n" +
+            "  vec3 col = base * light * (1.0 - uMetal * 0.55) + specColour * (spec + fresnel * 0.22) * uSpecular * (uSunGain * 1.1 + 0.25)\n" +
+            "           + base * uEmissive * 1.4;\n" +
+            "  col = col / (col + vec3(0.85)) * 1.55;\n" +
             "  float viewDist = length(uEye - vWorld);\n" +
             "  float fog = uFogEnabled * clamp((viewDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.001), 0.0, 1.0);\n" +
             "  gl_FragColor = vec4(mix(col, uFogColor, fog), uAlpha);\n" +
@@ -403,7 +408,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     }
 
     private void buildCube() {
-        float[] p = new float[24 * 3], f = new float[24];
+        float[] p = new float[24 * 3], n = new float[24 * 3], f = new float[24];
         float[][] faces = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
         int v = 0;
         for (int faceIndex = 0; faceIndex < 6; faceIndex++) {
@@ -416,12 +421,16 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
                 p[v * 3] = normal[0] * 0.5f + u[0] * su + w[0] * sw;
                 p[v * 3 + 1] = normal[1] * 0.5f + u[1] * su + w[1] * sw;
                 p[v * 3 + 2] = normal[2] * 0.5f + u[2] * su + w[2] * sw;
+                n[v * 3] = normal[0];
+                n[v * 3 + 1] = normal[1];
+                n[v * 3 + 2] = normal[2];
                 f[v] = faceIndex;
                 v++;
             }
         }
         short[] idx = {0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 8, 9, 10, 8, 10, 11, 12, 14, 13, 12, 15, 14, 16, 17, 18, 16, 18, 19, 20, 22, 21, 20, 23, 22};
         cubePositions = floatBuffer(p);
+        cubeNormals = floatBuffer(n);
         faceBuffer = floatBuffer(f);
         cubeIndices = shortBuffer(idx);
     }
@@ -977,7 +986,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniformMatrix4fv(uMvp, 1, false, mMvp, 0);
         GLES20.glUniformMatrix4fv(uModel, 1, false, mModel, 0);
         GLES20.glUniformMatrix3fv(uNormal, 1, false, normal3, 0);
-        GLES20.glUniform1f(uUseCustomNorm, kind == 1 ? 0f : 1f);
+        GLES20.glUniform1f(uUseCustomNorm, 1f);
         GLES20.glUniform3f(uColor, r, g, b);
         GLES20.glUniform1f(uAlpha, alpha);
         GLES20.glUniform1f(uRough, (float) material.roughness);
@@ -992,7 +1001,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         GLES20.glUniform1i(uAsset, 1);
         bindTexture(1, assetTexture != 0 ? assetTexture : textures.atlasTexture());
         GLES20.glUniform1i(uAtlas, 0);
-        FloatBuffer posBuf = cubePositions, normBuf = cubePositions, fBuf = faceBuffer;
+        FloatBuffer posBuf = cubePositions, normBuf = cubeNormals != null ? cubeNormals : cubePositions, fBuf = faceBuffer;
         ShortBuffer idxBuf = cubeIndices;
         int idxCount = 36;
         if (kind == 0 && spherePositions != null) { posBuf = spherePositions; normBuf = sphereNormals; fBuf = sphereFaces; idxBuf = sphereIndices; idxCount = sphereIndexCount; }
@@ -1041,29 +1050,71 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
     private void drawCharacter(EngineLighting light) {
         if (scene.firstPerson) return;
+        AvatarProfile av = scene.avatar != null ? scene.avatar : AvatarProfile.defaultAvatar();
         double[] p = scene.charPos;
         double yaw = Double.isNaN(scene.renderYaw) ? scene.charYaw : scene.renderYaw;
         float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
         EngineMaterial skin = EngineMaterial.of(256);
-        float speedFrac = (float) Math.min(1.0, scene.charSpeed / Math.max(1.0, scene.walkSpeed));
-        float swing = (float) Math.sin(scene.charWalkPhase) * 0.65f * speedFrac;
-        float bob = scene.onGround ? Math.abs((float) Math.sin(scene.charWalkPhase)) * 0.14f * speedFrac : 0f;
-        float armPitchL = scene.onGround ? -swing : -2.3f;
-        float armPitchR = scene.onGround ? swing : -2.3f;
-        float legPitchL = scene.onGround ? swing : 0.35f;
-        float legPitchR = scene.onGround ? -swing : -0.25f;
-        float[] pants = {0.18f, 0.28f, 0.45f};
-        float[] eyeCol = {0.08f, 0.09f, 0.12f};
 
-        charPart(p, cy, sy, 0, 3.0f + bob, 0, 0, 0, 2.0f, 2.0f, 1.0f, TORSO, skin, light, 1);
-        charPart(p, cy, sy, 0, 4.62f + bob, 0, 0, 0, 1.2f, 1.2f, 1.2f, HEAD, skin, light, 0);
-        charPart(p, cy, sy, -0.24f, 4.72f + bob, 0.56f, 0, 0, 0.14f, 0.18f, 0.10f, eyeCol, skin, light, 1);
-        charPart(p, cy, sy, 0.24f, 4.72f + bob, 0.56f, 0, 0, 0.14f, 0.18f, 0.10f, eyeCol, skin, light, 1);
-        charPart(p, cy, sy, 0f, 4.44f + bob, 0.56f, 0, 0, 0.38f, 0.08f, 0.10f, eyeCol, skin, light, 1);
-        charPart(p, cy, sy, -1.52f, 3.9f + bob, 0, -0.9f, armPitchL, 0.95f, 1.95f, 0.95f, HEAD, skin, light, 1);
-        charPart(p, cy, sy, 1.52f, 3.9f + bob, 0, -0.9f, armPitchR, 0.95f, 1.95f, 0.95f, HEAD, skin, light, 1);
-        charPart(p, cy, sy, -0.52f, 1.95f + bob, 0, -0.95f, legPitchL, 0.96f, 1.95f, 0.96f, pants, skin, light, 1);
-        charPart(p, cy, sy, 0.52f, 1.95f + bob, 0, -0.95f, legPitchR, 0.96f, 1.95f, 0.96f, pants, skin, light, 1);
+        float hs = av.heightScale;
+        float ws = av.widthScale;
+        float ds = av.depthScale;
+        float hds = av.headScale;
+        float speedFrac = (float) Math.min(1.0, scene.charSpeed / Math.max(1.0, scene.walkSpeed));
+        float breath = (float) Math.sin(scene.idleTime * 2.4) * 0.03f * (1f - speedFrac);
+        float landSquash = scene.landTimer > 0 ? (float) Math.sin(scene.landTimer * Math.PI / 0.18) * 0.22f : 0f;
+        float swing = (float) Math.sin(scene.charWalkPhase) * 0.72f * speedFrac;
+        float bob = (scene.onGround ? Math.abs((float) Math.sin(scene.charWalkPhase)) * 0.16f * speedFrac : 0f) + breath - landSquash;
+        float torsoLean = speedFrac * 0.10f;
+        float armPitchL = scene.onGround ? (-swing + (float) Math.sin(scene.idleTime * 2.4) * 0.04f * (1f - speedFrac)) : -2.45f;
+        float armPitchR = scene.onGround ? (swing - (float) Math.sin(scene.idleTime * 2.4) * 0.04f * (1f - speedFrac)) : -2.45f;
+        float elbowBendL = scene.onGround ? Math.max(0f, -armPitchL) * 0.55f + 0.12f : 0.35f;
+        float elbowBendR = scene.onGround ? Math.max(0f, -armPitchR) * 0.55f + 0.12f : 0.35f;
+        float legPitchL = scene.onGround ? swing : 0.42f;
+        float legPitchR = scene.onGround ? -swing : -0.28f;
+        float kneeBendL = scene.onGround ? Math.max(0f, -legPitchL) * 0.75f + landSquash * 1.4f : 0.55f;
+        float kneeBendR = scene.onGround ? Math.max(0f, -legPitchR) * 0.75f + landSquash * 1.4f : 0.45f;
+        float[] eyeCol = {0.07f, 0.08f, 0.11f};
+        float[] shadowCol = {0.05f, 0.06f, 0.08f};
+
+        // Ground contact shadow disc
+        if (scene.onGround) {
+            charPart(p, cy, sy, 0, 0.04f, 0, 0, 0, 2.1f * ws, 0.03f, 1.7f * ds, shadowCol, skin, light, 0);
+        }
+
+        // LowerTorso & UpperTorso (R15)
+        charPart(p, cy, sy, 0, 2.25f * hs + bob, 0, 0, torsoLean * 0.5f, 1.95f * ws, 0.65f * hs, 0.98f * ds, av.torsoColor, skin, light, 1);
+        charPart(p, cy, sy, 0, 3.25f * hs + bob, 0, 0, torsoLean, 2.02f * ws, 1.38f * hs, 1.04f * ds, av.torsoColor, skin, light, 1);
+
+        // Head + face
+        float headY = 4.58f * hs + bob;
+        charPart(p, cy, sy, 0, headY, 0, 0, 0, 1.18f * hds, 1.18f * hds, 1.18f * hds, av.headColor, skin, light, 0);
+        charPart(p, cy, sy, -0.22f * hds, headY + 0.10f * hds, 0.54f * hds, 0, 0, 0.13f * hds, 0.18f * hds, 0.10f * hds, eyeCol, skin, light, 1);
+        charPart(p, cy, sy, 0.22f * hds, headY + 0.10f * hds, 0.54f * hds, 0, 0, 0.13f * hds, 0.18f * hds, 0.10f * hds, eyeCol, skin, light, 1);
+        charPart(p, cy, sy, 0f, headY - 0.18f * hds, 0.54f * hds, 0, 0, 0.36f * hds, 0.07f * hds, 0.10f * hds, eyeCol, skin, light, 1);
+
+        // Articulated R15 Arms (UpperArm + LowerArm/Hand with elbow bend)
+        float shoulderY = 3.88f * hs + bob;
+        float armX = 1.48f * ws;
+        float uArmH = 0.96f * hs, lArmH = 0.96f * hs;
+        drawLimbChain(p, cy, sy, -armX, shoulderY, 0, armPitchL, armPitchL - elbowBendL, uArmH, lArmH, 0.92f * ws, 0.92f * ds, av.leftArmColor, skin, light);
+        drawLimbChain(p, cy, sy, armX, shoulderY, 0, armPitchR, armPitchR - elbowBendR, uArmH, lArmH, 0.92f * ws, 0.92f * ds, av.rightArmColor, skin, light);
+
+        // Articulated R15 Legs (UpperLeg + LowerLeg/Foot with knee bend)
+        float hipY = 1.94f * hs + bob;
+        float legX = 0.52f * ws;
+        float uLegH = 0.98f * hs, lLegH = 0.98f * hs;
+        drawLimbChain(p, cy, sy, -legX, hipY, 0, legPitchL, legPitchL + kneeBendL, uLegH, lLegH, 0.94f * ws, 0.94f * ds, av.leftLegColor, skin, light);
+        drawLimbChain(p, cy, sy, legX, hipY, 0, legPitchR, legPitchR + kneeBendR, uLegH, lLegH, 0.94f * ws, 0.94f * ds, av.rightLegColor, skin, light);
+    }
+
+    private void drawLimbChain(double[] origin, float cy, float sy, float ox, float pivotY, float oz,
+                               float upperPitch, float lowerPitch, float upperLen, float lowerLen,
+                               float w, float d, float[] color, EngineMaterial skin, EngineLighting light) {
+        charPart(origin, cy, sy, ox, pivotY, oz, -upperLen * 0.5f, upperPitch, w, upperLen, d, color, skin, light, 1);
+        float jointY = pivotY - upperLen * (float) Math.cos(upperPitch);
+        float jointZ = oz - upperLen * (float) Math.sin(upperPitch);
+        charPart(origin, cy, sy, ox, jointY, jointZ, -lowerLen * 0.5f, lowerPitch, w * 0.95f, lowerLen, d * 0.95f, color, skin, light, 1);
     }
 
     private void charPart(double[] origin, float cy, float sy, float ox, float pivotYAboveFeet, float oz,
