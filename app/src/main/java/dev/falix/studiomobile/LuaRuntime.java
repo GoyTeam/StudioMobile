@@ -312,6 +312,8 @@ final class LuaRuntime {
     }
 
     Object executeScript(Instance scriptInst, String source) {
+        boolean wasRunning = running;
+        running = true;
         try {
             List<Token> tokens = tokenize(source);
             Parser parser = new Parser(tokens);
@@ -326,6 +328,8 @@ final class LuaRuntime {
         } catch (Throwable err) {
             String msg = err.getMessage() == null ? err.getClass().getSimpleName() : err.getMessage();
             log("error", "[" + scriptInst.name + "] " + msg);
+        } finally {
+            if (!wasRunning) running = false;
         }
         return null;
     }
