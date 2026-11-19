@@ -537,7 +537,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         cylNormals = floatBuffer(toFloatArr(n));
         cylFaces = floatBuffer(toFloatArr(f));
         cylIndices = shortBuffer(toShortArr(idx));
-        cylIndexCount = idx.length;
+        cylIndexCount = idx.size();
     }
 
     private void buildWedge() {

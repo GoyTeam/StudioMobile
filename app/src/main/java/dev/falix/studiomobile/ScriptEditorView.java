@@ -36,6 +36,27 @@ final class ScriptEditorView extends LinearLayout {
         setOrientation(VERTICAL);
         setBackgroundColor(0xFF141821);
 
+        codeField = new EditText(ctx);
+        codeField.setBackgroundColor(0xFF141821);
+        codeField.setTextColor(0xFFE6ECF7);
+        codeField.setHintTextColor(0xFF5A6478);
+        codeField.setHint("-- Write Luau code here...");
+        codeField.setTypeface(Typeface.MONOSPACE);
+        codeField.setTextSize(12.5f);
+        codeField.setGravity(Gravity.TOP | Gravity.START);
+        codeField.setPadding(dp(12), dp(10), dp(12), dp(40));
+        codeField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        codeField.setHorizontallyScrolling(false);
+        codeField.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            public void afterTextChanged(Editable s) {
+                if (updating) return;
+                highlight(s);
+                updateStats(s);
+            }
+        });
+
         LinearLayout top = new LinearLayout(ctx);
         top.setOrientation(HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
@@ -80,26 +101,6 @@ final class ScriptEditorView extends LinearLayout {
 
         ScrollView scroll = new ScrollView(ctx);
         scroll.setFillViewport(true);
-        codeField = new EditText(ctx);
-        codeField.setBackgroundColor(0xFF141821);
-        codeField.setTextColor(0xFFE6ECF7);
-        codeField.setHintTextColor(0xFF5A6478);
-        codeField.setHint("-- Write Luau code here...");
-        codeField.setTypeface(Typeface.MONOSPACE);
-        codeField.setTextSize(12.5f);
-        codeField.setGravity(Gravity.TOP | Gravity.START);
-        codeField.setPadding(dp(12), dp(10), dp(12), dp(40));
-        codeField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        codeField.setHorizontallyScrolling(false);
-        codeField.addTextChangedListener(new TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            public void afterTextChanged(Editable s) {
-                if (updating) return;
-                highlight(s);
-                updateStats(s);
-            }
-        });
         scroll.addView(codeField, new ScrollView.LayoutParams(-1, -1));
         addView(scroll, new LayoutParams(-1, 0, 1));
 
