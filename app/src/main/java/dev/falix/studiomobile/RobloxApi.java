@@ -122,9 +122,35 @@ public final class RobloxApi {
     public Listing list(Session s,Set<Long> manual) {
         Listing result=new Listing();LinkedHashMap<Long,Experience> map=new LinkedHashMap<>();String cursor="";
         Set<String> cursors=new HashSet<>();
+        // 1. Studio Start Page universe search (discovers Public AND Private user experiences without Universe ID)
+        try {
+            String sCursor = "";
+            Set<String> sSeen = new HashSet<>();
+            do {
+                String url = ROOT + "/universes/v1/search?isTemplates=false&isArchived=false&creatorTargetId=" + s.userId
+                        + "&creatorType=User&limit=50&sortOrder=Desc" + (sCursor.isEmpty() ? "" : "&cursor=" + enc(sCursor));
+                JSONObject page = json(url, s.key, null);
+                JSONArray data = page.optJSONArray("data");
+                if (data == null) break;
+                for (int i = 0; i < data.length(); i++) {
+                    JSONObject o = data.getJSONObject(i);
+                    long uid = o.optLong("id", 0);
+                    if (uid <= 0) continue;
+                    Experience e = new Experience(uid, o.optString("name", "Experience " + uid), o.optLong("rootPlaceId", 0));
+                    String priv = o.optString("privacyType", "");
+                    e.visibility = "Public".equalsIgnoreCase(priv) ? "Public" : ("Private".equalsIgnoreCase(priv) ? "Private" : "Cloud");
+                    e.cloudVerified = true;
+                    map.put(e.id, e);
+                }
+                sCursor = page.optString("nextPageCursor", "");
+                if ("null".equals(sCursor)) sCursor = "";
+                if (!sCursor.isEmpty() && !sSeen.add(sCursor)) break;
+            } while (!sCursor.isEmpty());
+        } catch (Exception ignored) { }
+        // 2. Public & accessible user games via games.roblox.com v2
         try {
             do {
-                JSONObject page=json("https://games.roblox.com/v2/users/"+s.userId+"/games?accessFilter=Public&limit=50&sortOrder=Desc"+(cursor.isEmpty()?"":"&cursor="+enc(cursor)),null,null);
+                JSONObject page=json("https://games.roblox.com/v2/users/"+s.userId+"/games?accessFilter=2&limit=50&sortOrder=Desc"+(cursor.isEmpty()?"":"&cursor="+enc(cursor)),null,null);
                 JSONArray data=page.optJSONArray("data");if(data==null)throw new IOException("Unexpected listing response.");
                 for(int i=0;i<data.length();i++){JSONObject o=data.getJSONObject(i);JSONObject root=o.optJSONObject("rootPlace");Experience e=new Experience(o.getLong("id"),o.optString("name"),root==null?0:root.optLong("id",0));e.visibility="Public";map.put(e.id,e);}
                 cursor=page.optString("nextPageCursor","");if("null".equals(cursor))cursor="";
@@ -148,6 +174,20 @@ public final class RobloxApi {
                     String gname=grp.optString("name","Group");
                     fetchedGroups++;
                     try {
+                        try {
+                            JSONObject sg = json(ROOT + "/universes/v1/search?isTemplates=false&isArchived=false&creatorTargetId=" + gid + "&creatorType=Group&limit=50&sortOrder=Desc", s.key, null);
+                            JSONArray sgd = sg.optJSONArray("data");
+                            if (sgd != null) for (int j = 0; j < sgd.length(); j++) {
+                                JSONObject o = sgd.getJSONObject(j);
+                                long uid = o.optLong("id", 0);
+                                if (uid > 0 && !map.containsKey(uid)) {
+                                    Experience e = new Experience(uid, o.optString("name") + " · " + gname, o.optLong("rootPlaceId", 0));
+                                    e.visibility = "Group";
+                                    e.cloudVerified = true;
+                                    map.put(e.id, e);
+                                }
+                            }
+                        } catch (Exception ignored) { }
                         JSONObject gp=json("https://games.roblox.com/v2/groups/"+gid+"/games?accessFilter=2&limit=50&sortOrder=Desc",null,null);
                         JSONArray gdata=gp.optJSONArray("data");
                         if(gdata!=null)for(int j=0;j<gdata.length();j++){

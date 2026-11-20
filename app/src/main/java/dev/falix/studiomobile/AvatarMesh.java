@@ -33,43 +33,96 @@ final class AvatarMesh {
         { 0.50f, 1.00f, 0.00f}  // 10 R_LOWER_LEG
     };
 
-    static int classifyIsland(float cx, float cy, float cz, float minY, float maxY) {
-        // Keep entire welded shells (hood, backpack, arms, legs, torso) unbroken
-        if (cy >= 3.92f || minY >= 3.75f) return PART_HEAD;
-        if (cy >= 1.96f) {
-            if (cx < -1.02f) return cy >= 2.95f ? PART_L_UPPER_ARM : PART_L_LOWER_ARM;
-            if (cx >  1.02f) return cy >= 2.95f ? PART_R_UPPER_ARM : PART_R_LOWER_ARM;
-            return cy >= 2.55f ? PART_UPPER_TORSO : PART_LOWER_TORSO;
+    static float smoothstep(float e0, float e1, float x) {
+        float t = Math.max(0f, Math.min(1f, (x - e0) / (e1 - e0)));
+        return t * t * (3f - 2f * t);
+    }
+
+    /** Computes smooth 2-bone Linear-Blend Skinning weights for any normalized Roblox avatar vertex (0..5.2 studs). */
+    static void computeSkinWeights(float x, float y, float z, byte[] boneA, byte[] boneB, float[] wA, int idx) {
+        // Head & hood/hats (smooth neck blend 3.80..4.04)
+        if (y >= 3.80f && Math.abs(x) <= 1.28f) {
+            float t = smoothstep(3.80f, 4.04f, y);
+            boneA[idx] = PART_HEAD;
+            boneB[idx] = PART_UPPER_TORSO;
+            wA[idx] = t;
+            return;
         }
-        if (cx <= 0.0f) return cy >= 1.00f ? PART_L_UPPER_LEG : PART_L_LOWER_LEG;
-        return cy >= 1.00f ? PART_R_UPPER_LEG : PART_R_LOWER_LEG;
-    }
-
-    private static int ufFind(int[] p, int x) {
-        while (p[x] != x) { p[x] = p[p[x]]; x = p[x]; }
-        return x;
-    }
-
-    private static void ufUnion(int[] p, int a, int b) {
-        int ra = ufFind(p, a), rb = ufFind(p, b);
-        if (ra != rb) p[ra] = rb;
+        // Legs (y < 2.04)
+        if (y < 2.04f) {
+            boolean left = x <= 0f;
+            int uLeg = left ? PART_L_UPPER_LEG : PART_R_UPPER_LEG;
+            int lLeg = left ? PART_L_LOWER_LEG : PART_R_LOWER_LEG;
+            if (y > 1.84f) {
+                float hip = smoothstep(1.84f, 2.04f, y);
+                boneA[idx] = PART_LOWER_TORSO;
+                boneB[idx] = (byte) uLeg;
+                wA[idx] = hip;
+            } else {
+                float knee = smoothstep(0.84f, 1.16f, y);
+                boneA[idx] = (byte) uLeg;
+                boneB[idx] = (byte) lLeg;
+                wA[idx] = knee;
+            }
+            return;
+        }
+        // Left Arm (x < -0.94)
+        if (x < -0.94f) {
+            if (x > -1.12f) {
+                float sh = smoothstep(-0.94f, -1.12f, x);
+                boneA[idx] = PART_L_UPPER_ARM;
+                boneB[idx] = PART_UPPER_TORSO;
+                wA[idx] = sh;
+            } else {
+                float el = smoothstep(2.76f, 3.12f, y);
+                boneA[idx] = PART_L_UPPER_ARM;
+                boneB[idx] = PART_L_LOWER_ARM;
+                wA[idx] = el;
+            }
+            return;
+        }
+        // Right Arm (x > 0.94)
+        if (x > 0.94f) {
+            if (x < 1.12f) {
+                float sh = smoothstep(0.94f, 1.12f, x);
+                boneA[idx] = PART_R_UPPER_ARM;
+                boneB[idx] = PART_UPPER_TORSO;
+                wA[idx] = sh;
+            } else {
+                float el = smoothstep(2.76f, 3.12f, y);
+                boneA[idx] = PART_R_UPPER_ARM;
+                boneB[idx] = PART_R_LOWER_ARM;
+                wA[idx] = el;
+            }
+            return;
+        }
+        // Torso & Backpack (smooth waist blend 2.32..2.76)
+        float waist = smoothstep(2.32f, 2.76f, y);
+        boneA[idx] = PART_UPPER_TORSO;
+        boneB[idx] = PART_LOWER_TORSO;
+        wA[idx] = waist;
     }
 
     static final class SubMesh {
         final String materialName;
-        final int partId;
         final float[] positions;
         final float[] normals;
         final float[] uvs;
+        final byte[] boneA;
+        final byte[] boneB;
+        final float[] weightA;
         final int vertexCount;
         final Bitmap texture;
 
-        SubMesh(String materialName, int partId, float[] positions, float[] normals, float[] uvs, int vertexCount, Bitmap texture) {
+        SubMesh(String materialName, float[] positions, float[] normals, float[] uvs,
+                byte[] boneA, byte[] boneB, float[] weightA, int vertexCount, Bitmap texture) {
             this.materialName = materialName;
-            this.partId = partId;
             this.positions = positions;
             this.normals = normals;
             this.uvs = uvs;
+            this.boneA = boneA;
+            this.boneB = boneB;
+            this.weightA = weightA;
             this.vertexCount = vertexCount;
             this.texture = texture;
         }
@@ -380,84 +433,29 @@ final class AvatarMesh {
                 }
                 if (cached != null) tex = cached;
             }
-            // Group welded mesh islands via Union-Find on quantized vertex positions so no limb/hood/backpack is ever torn across a seam
-            int triCount = vc / 3;
-            float[] nx = new float[vc], ny = new float[vc], nz = new float[vc];
-            int[] parent = new int[triCount];
-            for (int t = 0; t < triCount; t++) parent[t] = t;
-            HashMap<Long, Integer> vertToTri = new HashMap<>(vc);
-            for (int t = 0; t < triCount; t++) {
-                for (int k = 0; k < 3; k++) {
-                    int vi = t * 3 + k;
-                    float vx = (b.pos.get(vi * 3) - cx) * scale;
-                    float vy = (b.pos.get(vi * 3 + 1) - minY) * scale;
-                    float vz = (b.pos.get(vi * 3 + 2) - cz) * scale;
-                    nx[vi] = vx; ny[vi] = vy; nz[vi] = vz;
-                    long qx = Math.round(vx * 180f) + 100000L;
-                    long qy = Math.round(vy * 180f) + 100000L;
-                    long qz = Math.round(vz * 180f) + 100000L;
-                    long key = (qx << 40) ^ (qy << 20) ^ qz;
-                    Integer prev = vertToTri.put(key, t);
-                    if (prev != null) ufUnion(parent, t, prev);
-                }
+            // Keep mesh 100% watertight and compute smooth per-vertex 2-bone skinning weights
+            float[] posArr = new float[b.pos.size()];
+            float[] normArr = new float[b.norm.size()];
+            float[] uvArr = new float[b.uv.size()];
+            byte[] boneA = new byte[vc];
+            byte[] boneB = new byte[vc];
+            float[] weightA = new float[vc];
+            for (int i = 0; i < vc; i++) {
+                float vx = (b.pos.get(i * 3) - cx) * scale;
+                float vy = (b.pos.get(i * 3 + 1) - minY) * scale;
+                float vz = (b.pos.get(i * 3 + 2) - cz) * scale;
+                posArr[i * 3] = vx;
+                posArr[i * 3 + 1] = vy;
+                posArr[i * 3 + 2] = vz;
+                normArr[i * 3] = b.norm.get(i * 3);
+                normArr[i * 3 + 1] = b.norm.get(i * 3 + 1);
+                normArr[i * 3 + 2] = b.norm.get(i * 3 + 2);
+                uvArr[i * 2] = b.uv.get(i * 2);
+                uvArr[i * 2 + 1] = b.uv.get(i * 2 + 1);
+                computeSkinWeights(vx, vy, vz, boneA, boneB, weightA, i);
             }
-            // Compute centroid & vertical bounds per connected island
-            HashMap<Integer, float[]> islandStats = new HashMap<>();
-            for (int t = 0; t < triCount; t++) {
-                int r = ufFind(parent, t);
-                float[] st = islandStats.get(r);
-                if (st == null) {
-                    st = new float[]{0f, 0f, 0f, 0f, Float.MAX_VALUE, -Float.MAX_VALUE};
-                    islandStats.put(r, st);
-                }
-                for (int k = 0; k < 3; k++) {
-                    int vi = t * 3 + k;
-                    st[0] += nx[vi]; st[1] += ny[vi]; st[2] += nz[vi]; st[3] += 1f;
-                    if (ny[vi] < st[4]) st[4] = ny[vi];
-                    if (ny[vi] > st[5]) st[5] = ny[vi];
-                }
-            }
-            HashMap<Integer, Integer> islandPart = new HashMap<>();
-            for (Map.Entry<Integer, float[]> ie : islandStats.entrySet()) {
-                float[] st = ie.getValue();
-                float inv = 1f / Math.max(1f, st[3]);
-                islandPart.put(ie.getKey(), classifyIsland(st[0] * inv, st[1] * inv, st[2] * inv, st[4], st[5]));
-            }
-            Bucket[] parts = new Bucket[PART_PIVOTS.length];
-            for (int t = 0; t < triCount; t++) {
-                int pid = islandPart.get(ufFind(parent, t));
-                if (parts[pid] == null) parts[pid] = new Bucket();
-                Bucket pb = parts[pid];
-                for (int k = 0; k < 3; k++) {
-                    int vi = t * 3 + k;
-                    pb.pos.add(nx[vi]); pb.pos.add(ny[vi]); pb.pos.add(nz[vi]);
-                    pb.norm.add(b.norm.get(vi * 3));
-                    pb.norm.add(b.norm.get(vi * 3 + 1));
-                    pb.norm.add(b.norm.get(vi * 3 + 2));
-                    pb.uv.add(b.uv.get(vi * 2));
-                    pb.uv.add(b.uv.get(vi * 2 + 1));
-                }
-            }
-            for (int pid = 0; pid < parts.length; pid++) {
-                Bucket pb = parts[pid];
-                if (pb == null || pb.pos.size() < 9) continue;
-                int pvc = pb.pos.size() / 3;
-                float[] posArr = new float[pb.pos.size()];
-                float[] normArr = new float[pb.norm.size()];
-                float[] uvArr = new float[pb.uv.size()];
-                for (int i = 0; i < pvc; i++) {
-                    posArr[i * 3] = pb.pos.get(i * 3);
-                    posArr[i * 3 + 1] = pb.pos.get(i * 3 + 1);
-                    posArr[i * 3 + 2] = pb.pos.get(i * 3 + 2);
-                    normArr[i * 3] = pb.norm.get(i * 3);
-                    normArr[i * 3 + 1] = pb.norm.get(i * 3 + 1);
-                    normArr[i * 3 + 2] = pb.norm.get(i * 3 + 2);
-                    uvArr[i * 2] = pb.uv.get(i * 2);
-                    uvArr[i * 2 + 1] = pb.uv.get(i * 2 + 1);
-                }
-                subMeshes.add(new SubMesh(entry.getKey(), pid, posArr, normArr, uvArr, pvc, tex));
-                totalVerts += pvc;
-            }
+            subMeshes.add(new SubMesh(entry.getKey(), posArr, normArr, uvArr, boneA, boneB, weightA, vc, tex));
+            totalVerts += vc;
         }
         if (subMeshes.isEmpty()) return null;
         return new AvatarMesh(subMeshes, totalVerts, subMeshes.size() + " mats, " + totalVerts + " verts");

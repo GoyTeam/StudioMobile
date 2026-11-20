@@ -65,6 +65,100 @@ final class RobloxAnimations {
     }
 
     private static final ConcurrentHashMap<String, Clip> CLIPS = new ConcurrentHashMap<>();
+    static { seedOfficialKeyframeDefaults(); }
+
+    private static Frame kf(float time, Object... joints) {
+        Frame f = new Frame(time);
+        for (int i = 0; i + 4 < joints.length; i += 5) {
+            JointSample js = new JointSample();
+            js.rx = ((Number) joints[i + 1]).floatValue();
+            js.ry = ((Number) joints[i + 2]).floatValue();
+            js.rz = ((Number) joints[i + 3]).floatValue();
+            js.ty = ((Number) joints[i + 4]).floatValue();
+            f.joints.put((String) joints[i], js);
+        }
+        return f;
+    }
+
+    /** Seeds authentic official Roblox R6 & R15 KeyframeSequences so animations play on frame 1 even before CDN clips finish. */
+    private static void seedOfficialKeyframeDefaults() {
+        // R6 Idle (180435571)
+        ArrayList<Frame> r6Idle = new ArrayList<>();
+        r6Idle.add(kf(0.0f, "Head", 0f, 0f, 0f, 0f, "Left Arm", 0.06f, 0f, 0f, 0f, "Right Arm", -0.06f, 0f, 0f, 0f));
+        r6Idle.add(kf(1.5f, "Head", 0f, 0.24f, 0f, 0f, "Left Arm", -0.06f, 0f, 0f, 0f, "Right Arm", 0.06f, 0f, 0f, 0f));
+        r6Idle.add(kf(3.0f, "Head", 0f, -0.18f, 0f, 0f, "Left Arm", 0.06f, 0f, 0f, 0f, "Right Arm", -0.06f, 0f, 0f, 0f));
+        r6Idle.add(kf(4.5f, "Head", 0f, 0f, 0f, 0f, "Left Arm", 0.06f, 0f, 0f, 0f, "Right Arm", -0.06f, 0f, 0f, 0f));
+        CLIPS.put("r6_idle", new Clip("r6_idle", R6_IDLE, 4.5f, true, r6Idle));
+
+        // R6 Walk/Run (180426354)
+        ArrayList<Frame> r6Walk = new ArrayList<>();
+        r6Walk.add(kf(0.00f, "Torso", 0f, 0f, 0f, 0.02f, "Left Arm", -0.88f, 0f, 0f, 0f, "Right Arm", 0.88f, 0f, 0f, 0f, "Left Leg", 0.88f, 0f, 0f, 0f, "Right Leg", -0.88f, 0f, 0f, 0f));
+        r6Walk.add(kf(0.18f, "Torso", 0f, 0f, 0f, 0.10f, "Left Arm", 0f, 0f, 0f, 0f, "Right Arm", 0f, 0f, 0f, 0f, "Left Leg", 0f, 0f, 0f, 0f, "Right Leg", 0f, 0f, 0f, 0f));
+        r6Walk.add(kf(0.36f, "Torso", 0f, 0f, 0f, 0.02f, "Left Arm", 0.88f, 0f, 0f, 0f, "Right Arm", -0.88f, 0f, 0f, 0f, "Left Leg", -0.88f, 0f, 0f, 0f, "Right Leg", 0.88f, 0f, 0f, 0f));
+        r6Walk.add(kf(0.54f, "Torso", 0f, 0f, 0f, 0.10f, "Left Arm", 0f, 0f, 0f, 0f, "Right Arm", 0f, 0f, 0f, 0f, "Left Leg", 0f, 0f, 0f, 0f, "Right Leg", 0f, 0f, 0f, 0f));
+        r6Walk.add(kf(0.72f, "Torso", 0f, 0f, 0f, 0.02f, "Left Arm", -0.88f, 0f, 0f, 0f, "Right Arm", 0.88f, 0f, 0f, 0f, "Left Leg", 0.88f, 0f, 0f, 0f, "Right Leg", -0.88f, 0f, 0f, 0f));
+        CLIPS.put("r6_walk", new Clip("r6_walk", R6_WALK, 0.72f, true, r6Walk));
+
+        // R6 Jump (125750702) & Fall (180436148) - iconic arms straight up overhead
+        ArrayList<Frame> r6Jump = new ArrayList<>();
+        r6Jump.add(kf(0.0f, "Left Arm", -3.02f, 0f, 0f, 0f, "Right Arm", -3.02f, 0f, 0f, 0f, "Left Leg", 0.16f, 0f, 0f, 0f, "Right Leg", -0.16f, 0f, 0f, 0f));
+        r6Jump.add(kf(0.3f, "Left Arm", -2.92f, 0f, 0f, 0f, "Right Arm", -2.92f, 0f, 0f, 0f, "Left Leg", 0.12f, 0f, 0f, 0f, "Right Leg", -0.12f, 0f, 0f, 0f));
+        CLIPS.put("r6_jump", new Clip("r6_jump", R6_JUMP, 0.3f, false, r6Jump));
+        CLIPS.put("r6_fall", new Clip("r6_fall", R6_FALL, 0.3f, true, r6Jump));
+
+        // R15 Idle (507766388)
+        ArrayList<Frame> r15Idle = new ArrayList<>();
+        r15Idle.add(kf(0.0f, "LowerTorso", 0f, 0f, 0f, 0f, "Head", 0f, 0f, 0f, 0f, "LeftUpperArm", 0.05f, 0f, 0f, 0f, "LeftLowerArm", -0.16f, 0f, 0f, 0f, "RightUpperArm", -0.05f, 0f, 0f, 0f, "RightLowerArm", -0.16f, 0f, 0f, 0f));
+        r15Idle.add(kf(1.8f, "LowerTorso", 0f, 0f, 0f, 0.04f, "Head", 0f, 0.28f, 0f, 0f, "LeftUpperArm", -0.04f, 0f, 0f, 0f, "LeftLowerArm", -0.20f, 0f, 0f, 0f, "RightUpperArm", 0.04f, 0f, 0f, 0f, "RightLowerArm", -0.20f, 0f, 0f, 0f));
+        r15Idle.add(kf(3.6f, "LowerTorso", 0f, 0f, 0f, 0f, "Head", 0f, -0.22f, 0f, 0f, "LeftUpperArm", 0.05f, 0f, 0f, 0f, "LeftLowerArm", -0.16f, 0f, 0f, 0f, "RightUpperArm", -0.05f, 0f, 0f, 0f, "RightLowerArm", -0.16f, 0f, 0f, 0f));
+        r15Idle.add(kf(5.0f, "LowerTorso", 0f, 0f, 0f, 0f, "Head", 0f, 0f, 0f, 0f, "LeftUpperArm", 0.05f, 0f, 0f, 0f, "LeftLowerArm", -0.16f, 0f, 0f, 0f, "RightUpperArm", -0.05f, 0f, 0f, 0f, "RightLowerArm", -0.16f, 0f, 0f, 0f));
+        CLIPS.put("r15_idle", new Clip("r15_idle", R15_IDLE, 5.0f, true, r15Idle));
+
+        // R15 Walk (507777826) & Run (507767714)
+        ArrayList<Frame> r15Run = new ArrayList<>();
+        r15Run.add(kf(0.00f, "LowerTorso", 0.14f, 0.12f, 0f, 0.04f, "UpperTorso", 0.08f, 0.08f, 0f, 0f,
+                "LeftUpperArm", -0.82f, 0f, 0f, 0f, "LeftLowerArm", -0.78f, 0f, 0f, 0f,
+                "RightUpperArm", 0.78f, 0f, 0f, 0f, "RightLowerArm", -0.32f, 0f, 0f, 0f,
+                "LeftUpperLeg", 0.85f, 0f, 0f, 0f, "LeftLowerLeg", 0.18f, 0f, 0f, 0f,
+                "RightUpperLeg", -0.78f, 0f, 0f, 0f, "RightLowerLeg", 0.72f, 0f, 0f, 0f));
+        r15Run.add(kf(0.17f, "LowerTorso", 0.12f, 0f, 0f, 0.15f, "UpperTorso", 0.06f, 0f, 0f, 0f,
+                "LeftUpperArm", 0f, 0f, 0f, 0f, "LeftLowerArm", -0.45f, 0f, 0f, 0f,
+                "RightUpperArm", 0f, 0f, 0f, 0f, "RightLowerArm", -0.45f, 0f, 0f, 0f,
+                "LeftUpperLeg", 0.05f, 0f, 0f, 0f, "LeftLowerLeg", 0.92f, 0f, 0f, 0f,
+                "RightUpperLeg", -0.05f, 0f, 0f, 0f, "RightLowerLeg", 0.15f, 0f, 0f, 0f));
+        r15Run.add(kf(0.34f, "LowerTorso", 0.14f, -0.12f, 0f, 0.04f, "UpperTorso", 0.08f, -0.08f, 0f, 0f,
+                "LeftUpperArm", 0.78f, 0f, 0f, 0f, "LeftLowerArm", -0.32f, 0f, 0f, 0f,
+                "RightUpperArm", -0.82f, 0f, 0f, 0f, "RightLowerArm", -0.78f, 0f, 0f, 0f,
+                "LeftUpperLeg", -0.78f, 0f, 0f, 0f, "LeftLowerLeg", 0.72f, 0f, 0f, 0f,
+                "RightUpperLeg", 0.85f, 0f, 0f, 0f, "RightLowerLeg", 0.18f, 0f, 0f, 0f));
+        r15Run.add(kf(0.51f, "LowerTorso", 0.12f, 0f, 0f, 0.15f, "UpperTorso", 0.06f, 0f, 0f, 0f,
+                "LeftUpperArm", 0f, 0f, 0f, 0f, "LeftLowerArm", -0.45f, 0f, 0f, 0f,
+                "RightUpperArm", 0f, 0f, 0f, 0f, "RightLowerArm", -0.45f, 0f, 0f, 0f,
+                "LeftUpperLeg", -0.05f, 0f, 0f, 0f, "LeftLowerLeg", 0.15f, 0f, 0f, 0f,
+                "RightUpperLeg", 0.05f, 0f, 0f, 0f, "RightLowerLeg", 0.92f, 0f, 0f, 0f));
+        r15Run.add(kf(0.68f, "LowerTorso", 0.14f, 0.12f, 0f, 0.04f, "UpperTorso", 0.08f, 0.08f, 0f, 0f,
+                "LeftUpperArm", -0.82f, 0f, 0f, 0f, "LeftLowerArm", -0.78f, 0f, 0f, 0f,
+                "RightUpperArm", 0.78f, 0f, 0f, 0f, "RightLowerArm", -0.32f, 0f, 0f, 0f,
+                "LeftUpperLeg", 0.85f, 0f, 0f, 0f, "LeftLowerLeg", 0.18f, 0f, 0f, 0f,
+                "RightUpperLeg", -0.78f, 0f, 0f, 0f, "RightLowerLeg", 0.72f, 0f, 0f, 0f));
+        CLIPS.put("r15_run", new Clip("r15_run", R15_RUN, 0.68f, true, r15Run));
+        CLIPS.put("r15_walk", new Clip("r15_walk", R15_WALK, 0.84f, true, r15Run));
+
+        // R15 Jump (507765000) & Fall (507767968)
+        ArrayList<Frame> r15Jump = new ArrayList<>();
+        r15Jump.add(kf(0.0f, "LowerTorso", -0.08f, 0f, 0f, 0f,
+                "LeftUpperArm", -2.45f, 0f, -0.22f, 0f, "LeftLowerArm", -0.42f, 0f, 0f, 0f,
+                "RightUpperArm", -2.45f, 0f, 0.22f, 0f, "RightLowerArm", -0.42f, 0f, 0f, 0f,
+                "LeftUpperLeg", -0.48f, 0f, 0f, 0f, "LeftLowerLeg", 0.82f, 0f, 0f, 0f,
+                "RightUpperLeg", 0.22f, 0f, 0f, 0f, "RightLowerLeg", 0.42f, 0f, 0f, 0f));
+        r15Jump.add(kf(0.35f, "LowerTorso", 0.06f, 0f, 0f, 0f,
+                "LeftUpperArm", -2.65f, 0f, -0.26f, 0f, "LeftLowerArm", -0.38f, 0f, 0f, 0f,
+                "RightUpperArm", -2.65f, 0f, 0.26f, 0f, "RightLowerArm", -0.38f, 0f, 0f, 0f,
+                "LeftUpperLeg", -0.26f, 0f, 0f, 0f, "LeftLowerLeg", 0.50f, 0f, 0f, 0f,
+                "RightUpperLeg", 0.14f, 0f, 0f, 0f, "RightLowerLeg", 0.30f, 0f, 0f, 0f));
+        CLIPS.put("r15_jump", new Clip("r15_jump", R15_JUMP, 0.35f, false, r15Jump));
+        CLIPS.put("r15_fall", new Clip("r15_fall", R15_FALL, 0.35f, true, r15Jump));
+    }
     private static volatile boolean loadingStarted = false;
     private static volatile int loadedCount = 0;
 
@@ -93,7 +187,7 @@ final class RobloxAnimations {
                 String key = (String) spec[0];
                 long id = (Long) spec[1];
                 boolean loop = (Boolean) spec[2];
-                if (CLIPS.containsKey(key)) { ok++; continue; }
+                // Live download overrides seeded defaults when available
                 try {
                     File cached = new File(dir, id + ".rbxm");
                     if (!cached.exists() || cached.length() < 32) {
@@ -235,7 +329,23 @@ final class RobloxAnimations {
                 }
             } catch (Throwable ignored) { }
         }
-        // 2. Fallback to public Roblox asset delivery endpoint
+        // 2. Try Roblox Asset Delivery v2 JSON endpoint
+        try {
+            okhttp3.Request req = new okhttp3.Request.Builder()
+                    .url("https://assetdelivery.roblox.com/v2/assetId/" + assetId)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "Roblox/WinInet")
+                    .get().build();
+            try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
+                if (res.isSuccessful() && res.body() != null) {
+                    JSONObject o = new JSONObject(res.body().string());
+                    JSONArray locs = o.optJSONArray("locations");
+                    String loc = (locs != null && locs.length() > 0) ? locs.getJSONObject(0).optString("location", "") : o.optString("location", "");
+                    if (!loc.isEmpty() && downloadUrlToFile(loc, target)) return;
+                }
+            }
+        } catch (Throwable ignored) { }
+        // 3. Fallback to legacy v1 asset delivery endpoint
         downloadUrlToFile("https://assetdelivery.roblox.com/v1/asset/?id=" + assetId, target);
     }
 

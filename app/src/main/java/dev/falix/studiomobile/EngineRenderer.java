@@ -288,8 +288,12 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private int avatarProgram, avPos, avNorm, avUv, avMvp, avNormal, avTex, avHasTex, avSunDir, avSunColor, avSunGain, avAmbient;
     private static final class GlSubMesh {
         FloatBuffer pos, norm, uv;
-        int tex, count, partId;
+        float[] bindPos, skinnedPos;
+        byte[] boneA, boneB;
+        float[] weightA;
+        int tex, count;
     }
+    private final float[][] boneMats = new float[11][12];
     private AvatarMesh uploadedAvatarMesh;
     private final ArrayList<GlSubMesh> glAvatarParts = new ArrayList<>();
     private FloatBuffer cubeUvBuf, headPosBuf, headNormBuf, headUvBuf;
@@ -1361,12 +1365,17 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         glAvatarParts.clear();
         for (AvatarMesh.SubMesh sm : uploadedAvatarMesh.subMeshes) {
             GlSubMesh g = new GlSubMesh();
-            g.pos = floatBuffer(sm.positions);
+            g.bindPos = sm.positions;
+            g.skinnedPos = new float[sm.positions.length];
+            System.arraycopy(sm.positions, 0, g.skinnedPos, 0, sm.positions.length);
+            g.boneA = sm.boneA;
+            g.boneB = sm.boneB;
+            g.weightA = sm.weightA;
+            g.pos = floatBuffer(g.skinnedPos);
             g.norm = floatBuffer(sm.normals);
             g.uv = floatBuffer(sm.uvs);
             g.count = sm.vertexCount;
             g.tex = sm.texture != null ? uploadBitmapTex(0, sm.texture) : 0;
-            g.partId = sm.partId;
             glAvatarParts.add(g);
         }
     }
@@ -1382,8 +1391,14 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             RobloxAnimations.Pose pose = RobloxAnimations.evaluate(
                     av.isR15, scene.onGround, scene.charSpeed, scene.walkSpeed,
                     scene.idleTime, scene.charVel[1]);
+            buildAvatarBoneMatrices(av.isR15, pose);
+            float cy = (float) Math.cos(yaw), sy = (float) Math.sin(yaw);
+            double[] rootCf = { p[0], p[1] - scene.charHy, p[2], cy, 0, sy, 0, 1, 0, -sy, 0, cy };
+            setModel(rootCf, 1f, 1f, 1f);
             GLES20.glDisable(GLES20.GL_CULL_FACE);
             GLES20.glUseProgram(avatarProgram);
+            GLES20.glUniformMatrix4fv(avMvp, 1, false, mMvp, 0);
+            GLES20.glUniformMatrix3fv(avNormal, 1, false, normal3, 0);
             GLES20.glUniform3f(avSunDir, (float) light.sunDirection[0], (float) light.sunDirection[1], (float) light.sunDirection[2]);
             GLES20.glUniform3f(avSunColor, (float) light.sunColor[0], (float) light.sunColor[1], (float) light.sunColor[2]);
             GLES20.glUniform1f(avSunGain, (float) light.sunGain);
@@ -1393,9 +1408,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             if (avNorm >= 0) GLES20.glEnableVertexAttribArray(avNorm);
             if (avUv >= 0) GLES20.glEnableVertexAttribArray(avUv);
             for (GlSubMesh sub : glAvatarParts) {
-                setRiggedSubMeshModel(p, yaw, av.isR15, pose, sub.partId);
-                GLES20.glUniformMatrix4fv(avMvp, 1, false, mMvp, 0);
-                GLES20.glUniformMatrix3fv(avNormal, 1, false, normal3, 0);
+                skinSubMesh(sub);
                 if (sub.tex != 0) { bindTexture(0, sub.tex); GLES20.glUniform1f(avHasTex, 1f); }
                 else GLES20.glUniform1f(avHasTex, 0f);
                 GLES20.glVertexAttribPointer(avPos, 3, GLES20.GL_FLOAT, false, 0, sub.pos);
@@ -1463,109 +1476,101 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         drawTexturedChain(p, cy, sy, legX, hipY, 0, pose.rUpperLegX, pose.rUpperLegX + pose.rLowerLegX, uLegH, lLegH, 0.94f * ws, 0.94f * ds, legTex, light);
     }
 
-    private void setRiggedSubMeshModel(double[] origin, double baseYaw, boolean isR15,
-                                       RobloxAnimations.Pose pose, int partId) {
-        float px = 0f, py = 2.0f, pz = 0f;
-        float pitchX = 0f;
-        double partYaw = baseYaw;
-        float extraY = pose.bobY;
-        float extraZ = 0f;
-
-        if (partId == AvatarMesh.PART_HEAD) {
-            px = 0f; py = 4.00f; pz = 0f;
-            partYaw = baseYaw + pose.headYaw;
-            pitchX = pose.headPitch;
-        } else if (partId == AvatarMesh.PART_UPPER_TORSO) {
-            px = 0f; py = 2.55f; pz = 0f;
-            partYaw = baseYaw + pose.torsoYaw;
-            pitchX = pose.torsoPitch;
-        } else if (partId == AvatarMesh.PART_LOWER_TORSO) {
-            px = 0f; py = 2.00f; pz = 0f;
-            partYaw = baseYaw + (isR15 ? pose.torsoYaw * 0.4f : pose.torsoYaw);
-            pitchX = isR15 ? pose.torsoPitch * 0.5f : pose.torsoPitch;
-        } else if (partId == AvatarMesh.PART_L_UPPER_ARM) {
-            px = -1.50f; py = 3.85f; pz = 0f;
-            partYaw = baseYaw + pose.torsoYaw;
-            pitchX = pose.lUpperArmX;
-        } else if (partId == AvatarMesh.PART_L_LOWER_ARM) {
-            partYaw = baseYaw + pose.torsoYaw;
-            if (!isR15) {
-                px = -1.50f; py = 3.85f; pz = 0f;
-                pitchX = pose.lUpperArmX;
-            } else {
-                px = -1.50f; py = 2.95f; pz = 0f;
-                float uLen = 0.90f;
-                extraY += (3.85f - uLen * (float) Math.cos(pose.lUpperArmX)) - 2.95f;
-                extraZ += -uLen * (float) Math.sin(pose.lUpperArmX);
-                pitchX = pose.lUpperArmX + pose.lLowerArmX;
-            }
-        } else if (partId == AvatarMesh.PART_R_UPPER_ARM) {
-            px = 1.50f; py = 3.85f; pz = 0f;
-            partYaw = baseYaw + pose.torsoYaw;
-            pitchX = pose.rUpperArmX;
-        } else if (partId == AvatarMesh.PART_R_LOWER_ARM) {
-            partYaw = baseYaw + pose.torsoYaw;
-            if (!isR15) {
-                px = 1.50f; py = 3.85f; pz = 0f;
-                pitchX = pose.rUpperArmX;
-            } else {
-                px = 1.50f; py = 2.95f; pz = 0f;
-                float uLen = 0.90f;
-                extraY += (3.85f - uLen * (float) Math.cos(pose.rUpperArmX)) - 2.95f;
-                extraZ += -uLen * (float) Math.sin(pose.rUpperArmX);
-                pitchX = pose.rUpperArmX + pose.rLowerArmX;
-            }
-        } else if (partId == AvatarMesh.PART_L_UPPER_LEG) {
-            px = -0.50f; py = 1.98f; pz = 0f;
-            pitchX = pose.lUpperLegX;
-        } else if (partId == AvatarMesh.PART_L_LOWER_LEG) {
-            if (!isR15) {
-                px = -0.50f; py = 1.98f; pz = 0f;
-                pitchX = pose.lUpperLegX;
-            } else {
-                px = -0.50f; py = 1.00f; pz = 0f;
-                float uLen = 0.98f;
-                extraY += (1.98f - uLen * (float) Math.cos(pose.lUpperLegX)) - 1.00f;
-                extraZ += -uLen * (float) Math.sin(pose.lUpperLegX);
-                pitchX = pose.lUpperLegX + pose.lLowerLegX;
-            }
-        } else if (partId == AvatarMesh.PART_R_UPPER_LEG) {
-            px = 0.50f; py = 1.98f; pz = 0f;
-            pitchX = pose.rUpperLegX;
-        } else if (partId == AvatarMesh.PART_R_LOWER_LEG) {
-            if (!isR15) {
-                px = 0.50f; py = 1.98f; pz = 0f;
-                pitchX = pose.rUpperLegX;
-            } else {
-                px = 0.50f; py = 1.00f; pz = 0f;
-                float uLen = 0.98f;
-                extraY += (1.98f - uLen * (float) Math.cos(pose.rUpperLegX)) - 1.00f;
-                extraZ += -uLen * (float) Math.sin(pose.rUpperLegX);
-                pitchX = pose.rUpperLegX + pose.rLowerLegX;
-            }
-        }
-
-        // Compose M = T(worldFoot) * Ry(partYaw) * T(px, py+extraY, pz+extraZ) * Rx(pitchX) * T(-px, -py, -pz)
-        float cy = (float) Math.cos(partYaw), sy = (float) Math.sin(partYaw);
+    private void setBoneMat(int id, float px, float py, float pz, float pitchX, float yawY, float extraY, float extraZ) {
+        float cy = (float) Math.cos(yawY), sy = (float) Math.sin(yawY);
         float cp = (float) Math.cos(pitchX), sp = (float) Math.sin(pitchX);
         float r00 = cy,  r01 = sy * sp, r02 = sy * cp;
         float r10 = 0f,  r11 = cp,      r12 = -sp;
         float r20 = -sy, r21 = cy * sp, r22 = cy * cp;
-        float tpx = px * cy + (pz + extraZ) * sy;
-        float tpy = py + extraY;
-        float tpz = -px * sy + (pz + extraZ) * cy;
-        float rpx = r00 * (-px) + r01 * (-py) + r02 * (-pz);
-        float rpy = r10 * (-px) + r11 * (-py) + r12 * (-pz);
-        float rpz = r20 * (-px) + r21 * (-py) + r22 * (-pz);
-
-        double wx = origin[0] + tpx + rpx;
-        double wy = origin[1] - scene.charHy + tpy + rpy;
-        double wz = origin[2] + tpz + rpz;
-        double[] c = { wx, wy, wz, r00, r01, r02, r10, r11, r12, r20, r21, r22 };
-        setModel(c, 1f, 1f, 1f);
+        float[] m = boneMats[id];
+        m[0] = r00; m[1] = r01; m[2] = r02;
+        m[3] = r10; m[4] = r11; m[5] = r12;
+        m[6] = r20; m[7] = r21; m[8] = r22;
+        m[9]  = px + (r00 * (-px) + r01 * (-py) + r02 * (-pz));
+        m[10] = (py + extraY) + (r10 * (-px) + r11 * (-py) + r12 * (-pz));
+        m[11] = (pz + extraZ) + (r20 * (-px) + r21 * (-py) + r22 * (-pz));
     }
 
-    private void drawLimbChain(double[] origin, float cy, float sy, float ox, float pivotY, float oz,
+    private void buildAvatarBoneMatrices(boolean isR15, RobloxAnimations.Pose pose) {
+        float bob = pose.bobY;
+        setBoneMat(AvatarMesh.PART_HEAD, 0f, 4.00f, 0f, pose.headPitch, pose.headYaw, bob, 0f);
+        setBoneMat(AvatarMesh.PART_UPPER_TORSO, 0f, 2.55f, 0f, pose.torsoPitch, pose.torsoYaw, bob, 0f);
+        setBoneMat(AvatarMesh.PART_LOWER_TORSO, 0f, 2.00f, 0f, isR15 ? pose.torsoPitch * 0.5f : pose.torsoPitch,
+                isR15 ? pose.torsoYaw * 0.4f : pose.torsoYaw, bob, 0f);
+
+        setBoneMat(AvatarMesh.PART_L_UPPER_ARM, -1.50f, 3.85f, 0f, pose.lUpperArmX, pose.torsoYaw, bob, 0f);
+        if (!isR15) {
+            System.arraycopy(boneMats[AvatarMesh.PART_L_UPPER_ARM], 0, boneMats[AvatarMesh.PART_L_LOWER_ARM], 0, 12);
+        } else {
+            float uLen = 0.90f;
+            float ey = bob + (3.85f - uLen * (float) Math.cos(pose.lUpperArmX)) - 2.95f;
+            float ez = -uLen * (float) Math.sin(pose.lUpperArmX);
+            setBoneMat(AvatarMesh.PART_L_LOWER_ARM, -1.50f, 2.95f, 0f, pose.lUpperArmX + pose.lLowerArmX, pose.torsoYaw, ey, ez);
+        }
+
+        setBoneMat(AvatarMesh.PART_R_UPPER_ARM, 1.50f, 3.85f, 0f, pose.rUpperArmX, pose.torsoYaw, bob, 0f);
+        if (!isR15) {
+            System.arraycopy(boneMats[AvatarMesh.PART_R_UPPER_ARM], 0, boneMats[AvatarMesh.PART_R_LOWER_ARM], 0, 12);
+        } else {
+            float uLen = 0.90f;
+            float ey = bob + (3.85f - uLen * (float) Math.cos(pose.rUpperArmX)) - 2.95f;
+            float ez = -uLen * (float) Math.sin(pose.rUpperArmX);
+            setBoneMat(AvatarMesh.PART_R_LOWER_ARM, 1.50f, 2.95f, 0f, pose.rUpperArmX + pose.rLowerArmX, pose.torsoYaw, ey, ez);
+        }
+
+        setBoneMat(AvatarMesh.PART_L_UPPER_LEG, -0.50f, 1.98f, 0f, pose.lUpperLegX, 0f, bob, 0f);
+        if (!isR15) {
+            System.arraycopy(boneMats[AvatarMesh.PART_L_UPPER_LEG], 0, boneMats[AvatarMesh.PART_L_LOWER_LEG], 0, 12);
+        } else {
+            float uLen = 0.98f;
+            float ky = bob + (1.98f - uLen * (float) Math.cos(pose.lUpperLegX)) - 1.00f;
+            float kz = -uLen * (float) Math.sin(pose.lUpperLegX);
+            setBoneMat(AvatarMesh.PART_L_LOWER_LEG, -0.50f, 1.00f, 0f, pose.lUpperLegX + pose.lLowerLegX, 0f, ky, kz);
+        }
+
+        setBoneMat(AvatarMesh.PART_R_UPPER_LEG, 0.50f, 1.98f, 0f, pose.rUpperLegX, 0f, bob, 0f);
+        if (!isR15) {
+            System.arraycopy(boneMats[AvatarMesh.PART_R_UPPER_LEG], 0, boneMats[AvatarMesh.PART_R_LOWER_LEG], 0, 12);
+        } else {
+            float uLen = 0.98f;
+            float ky = bob + (1.98f - uLen * (float) Math.cos(pose.rUpperLegX)) - 1.00f;
+            float kz = -uLen * (float) Math.sin(pose.rUpperLegX);
+            setBoneMat(AvatarMesh.PART_R_LOWER_LEG, 0.50f, 1.00f, 0f, pose.rUpperLegX + pose.rLowerLegX, 0f, ky, kz);
+        }
+    }
+
+    private void skinSubMesh(GlSubMesh sub) {
+        float[] srcP = sub.bindPos, dstP = sub.skinnedPos;
+        byte[] bA = sub.boneA, bB = sub.boneB;
+        float[] wA = sub.weightA;
+        int n = sub.count;
+        for (int i = 0; i < n; i++) {
+            int i3 = i * 3;
+            float vx = srcP[i3], vy = srcP[i3 + 1], vz = srcP[i3 + 2];
+            float wa = wA[i];
+            float[] mA = boneMats[bA[i]];
+            float ax = mA[0] * vx + mA[1] * vy + mA[2] * vz + mA[9];
+            float ay = mA[3] * vx + mA[4] * vy + mA[5] * vz + mA[10];
+            float az = mA[6] * vx + mA[7] * vy + mA[8] * vz + mA[11];
+            if (wa >= 0.999f) {
+                dstP[i3] = ax; dstP[i3 + 1] = ay; dstP[i3 + 2] = az;
+            } else {
+                float wb = 1f - wa;
+                float[] mB = boneMats[bB[i]];
+                float bx = mB[0] * vx + mB[1] * vy + mB[2] * vz + mB[9];
+                float by = mB[3] * vx + mB[4] * vy + mB[5] * vz + mB[10];
+                float bz = mB[6] * vx + mB[7] * vy + mB[8] * vz + mB[11];
+                dstP[i3] = ax * wa + bx * wb;
+                dstP[i3 + 1] = ay * wa + by * wb;
+                dstP[i3 + 2] = az * wa + bz * wb;
+            }
+        }
+        sub.pos.clear();
+        sub.pos.put(dstP);
+        sub.pos.position(0);
+    }
+
+        private void drawLimbChain(double[] origin, float cy, float sy, float ox, float pivotY, float oz,
                                float upperPitch, float lowerPitch, float upperLen, float lowerLen,
                                float w, float d, float[] color, EngineMaterial skin, EngineLighting light) {
         charPart(origin, cy, sy, ox, pivotY, oz, -upperLen * 0.5f, upperPitch, w, upperLen, d, color, skin, light, 1);
