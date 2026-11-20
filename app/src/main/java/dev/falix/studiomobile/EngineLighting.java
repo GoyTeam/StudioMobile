@@ -78,7 +78,7 @@ final class EngineLighting {
 
     // --- local light objects (max 4 are shaded per frame) ---
     static final int POINT = 0, SPOT = 1, SURFACE = 2;
-    static final int MAX_SHADED_LIGHTS = 4;
+    static final int MAX_SHADED_LIGHTS = 12;
     static final class Light {
         int kind; double[] position; double[] direction; double range;
         double[] color; double brightness; double cosAngle;
@@ -220,7 +220,7 @@ final class EngineLighting {
                     && child.getNumber("Brightness", 1) > 0
                     && child.parent != null && child.parent.isRenderable()) {   // Roblox lights need a part parent
                 lightCount++;
-                if (lights.size() < MAX_SHADED_LIGHTS) lights.add(resolveLight(child));
+                if (lights.size() < 64) lights.add(resolveLight(child));
             }
             walkLights(child, depth + 1);
         }

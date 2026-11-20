@@ -37,12 +37,17 @@ final class EngineView extends GLSurfaceView {
         this.scene = scene;
         setEGLContextClientVersion(2);
         textures = new EngineTextures(context.getCacheDir());
-        // A creator key lets EngineTextures use Open Cloud asset delivery instead of the public CDN.
+        RbxMeshDecoder meshDecoder = new RbxMeshDecoder(context.getCacheDir());
+        // Pass saved Open Cloud key and/or Roblox Web session cookie to both texture and mesh streamers.
         try {
-            String key = new CredentialVault(context).load();
+            CredentialVault cv = new CredentialVault(context);
+            String key = null;
+            try { key = cv.load(); } catch (Throwable ignored) { }
+            String cookie = cv.loadCookie();
             if (key != null && !key.isEmpty()) textures.setApiKey(key);
+            meshDecoder.setCredentials(key, cookie);
         } catch (Throwable ignored) { }
-        renderer = new EngineRenderer(scene, textures, (stage, error) -> {
+        renderer = new EngineRenderer(scene, textures, meshDecoder, (stage, error) -> {
             // A GL-thread failure must never kill the process: surface it in the editor instead.
             final String detail = stage + " — " + (error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage());
             post(() -> { if (listener != null) listener.onRendererError(detail); });

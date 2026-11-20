@@ -62,6 +62,9 @@ final class RobloxWebLoginDialog {
 
         FrameLayout webWrap = new FrameLayout(context);
         WebView web = new WebView(context);
+        web.setFocusable(true);
+        web.setFocusableInTouchMode(true);
+        web.setOnTouchListener((v, ev) -> { v.requestFocus(View.FOCUS_DOWN); return false; });
         WebSettings ws = web.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
@@ -113,6 +116,15 @@ final class RobloxWebLoginDialog {
         });
 
         dialog.show();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().clearFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM);
+            dialog.getWindow().setSoftInputMode(
+                    android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        }
+        web.requestFocus(View.FOCUS_DOWN);
         web.loadUrl("https://www.roblox.com/login");
         handler.postDelayed(checkCookie, 1500);
     }

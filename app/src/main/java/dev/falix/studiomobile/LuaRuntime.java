@@ -193,6 +193,9 @@ final class LuaRuntime {
     private ExecutorService pool;
     private final Signal heartbeat = new Signal();
     private final Signal renderStepped = new Signal();
+    private final Signal playerAdded = new Signal();
+    private final Signal characterAdded = new Signal();
+    private final Signal playerChatted = new Signal();
     private final ConcurrentHashMap<Instance, Signal> touchedSignals = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Instance, Signal> clickSignals = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Instance, Signal> changedSignals = new ConcurrentHashMap<>();
@@ -227,6 +230,14 @@ final class LuaRuntime {
         changedSignals.clear();
         heartbeat.listeners.clear();
         renderStepped.listeners.clear();
+        playerAdded.listeners.clear();
+        characterAdded.listeners.clear();
+        playerChatted.listeners.clear();
+        if (scene.avatar != null) {
+            localPlayerInst.name = scene.avatar.username;
+            localPlayerInst.props.put("DisplayName", scene.avatar.username);
+            localCharacter.name = scene.avatar.username;
+        }
         if (scene.root == null) return;
         ArrayList<Instance> scripts = new ArrayList<>();
         for (Instance inst : scene.root.all(null)) {
@@ -240,6 +251,13 @@ final class LuaRuntime {
         for (final Instance s : scripts) {
             runAsync(() -> executeScript(s, s.getString("Source", "")));
         }
+        // Fire PlayerAdded & CharacterAdded after scripts register listeners (matches Roblox Playtest boot)
+        runAsync(() -> {
+            try { Thread.sleep(100); } catch (InterruptedException ignored) { return; }
+            if (!running) return;
+            if (!playerAdded.listeners.isEmpty()) playerAdded.fire(this, new InstanceProxy(localPlayerInst));
+            if (!characterAdded.listeners.isEmpty()) characterAdded.fire(this, new InstanceProxy(localCharacter));
+        });
     }
 
     void runCommand(final String source) {
@@ -278,6 +296,13 @@ final class LuaRuntime {
         }
     }
 
+    void firePlayerChatted(String message) {
+        if (!running || message == null) return;
+        if (!playerChatted.listeners.isEmpty()) {
+            playerChatted.fire(this, message);
+        }
+    }
+
     void stop() {
         running = false;
         heartbeat.listeners.clear();
@@ -311,11 +336,35 @@ final class LuaRuntime {
         if (!running) throw new StopSignal();
     }
 
+    /** Preprocesses modern Roblox Luau syntax (+=, -=, *=, /=, ..=, type annotations, :: casts, export type). */
+    static String preprocessLuau(String src) {
+        if (src == null || src.isEmpty()) return "";
+        String[] lines = src.split("\r?\n", -1);
+        StringBuilder out = new StringBuilder(src.length() + 64);
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            String trimmed = line.trim();
+            if (trimmed.startsWith("export type ") || (trimmed.startsWith("type ") && trimmed.contains("="))) {
+                out.append("\n");
+                continue;
+            }
+            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*\+=\s*([^;\n]+)", "$1 = $1 + ($2)");
+            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*-=\s*([^;\n]+)", "$1 = $1 - ($2)");
+            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*\*=\s*([^;\n]+)", "$1 = $1 * ($2)");
+            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*/=\s*([^;\n]+)", "$1 = $1 / ($2)");
+            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*\.\.=\s*([^;\n]+)", "$1 = $1 .. ($2)");
+            line = line.replaceAll("(\blocal\s+[A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_][A-Za-z0-9_\.\?]*(\s*=)", "$1$2");
+            line = line.replaceAll("\s*::\s*[A-Za-z_][A-Za-z0-9_\.\?]*", "");
+            out.append(line).append("\n");
+        }
+        return out.toString();
+    }
+
     Object executeScript(Instance scriptInst, String source) {
         boolean prevRunning = running;
         running = true;
         try {
-            List<Token> tokens = tokenize(source);
+            List<Token> tokens = tokenize(preprocessLuau(source));
             Parser parser = new Parser(tokens);
             List<Stmt> stmts = parser.parseBlock();
             Env env = createGlobalEnv(scriptInst);
@@ -695,11 +744,24 @@ final class LuaRuntime {
         }
         if (inst == localPlayerInst) {
             if ("Character".equals(k)) return new InstanceProxy(localCharacter);
+            if ("CharacterAdded".equals(k)) return characterAdded.toTable(this);
+            if ("Chatted".equals(k)) return playerChatted.toTable(this);
+            if ("UserId".equals(k)) return scene.avatar != null ? (double) scene.avatar.userId : 1.0;
+            if ("PlayerGui".equals(k)) {
+                Instance sg = scene.root == null ? null : scene.root.findFirst("StarterGui");
+                return sg != null ? new InstanceProxy(sg) : null;
+            }
             if ("Name".equals(k)) return localPlayerInst.name;
             if ("DisplayName".equals(k)) return localPlayerInst.getString("DisplayName", "Player");
         }
-        if ("Players".equals(inst.className) && "LocalPlayer".equals(k)) {
-            return new InstanceProxy(localPlayerInst);
+        if ("Players".equals(inst.className)) {
+            if ("LocalPlayer".equals(k)) return new InstanceProxy(localPlayerInst);
+            if ("PlayerAdded".equals(k)) return playerAdded.toTable(this);
+            if ("GetPlayers".equals(k)) return (Callable) a -> {
+                LuaTable t = new LuaTable();
+                t.set(1.0, new InstanceProxy(localPlayerInst));
+                return t;
+            };
         }
         if ("RunService".equals(inst.className)) {
             if ("Heartbeat".equals(k)) return heartbeat.toTable(this);
@@ -870,7 +932,8 @@ final class LuaRuntime {
             String k = String.valueOf(key);
             if (inst == localHumanoid) {
                 if ("WalkSpeed".equals(k)) { scene.walkSpeed = asNum(val, 16); return; }
-                if ("JumpPower".equals(k)) { scene.jumpPower = asNum(val, 50); return; }
+                if ("JumpPower".equals(k)) { scene.jumpPower = asNum(val, 50); scene.useJumpPower = true; return; }
+                if ("JumpHeight".equals(k)) { scene.jumpHeight = asNum(val, 7.2); scene.useJumpPower = false; return; }
                 if ("Jump".equals(k) && isTruthy(val)) { scene.jumpQueued = true; return; }
                 if ("Health".equals(k)) {
                     double h = asNum(val, 100);

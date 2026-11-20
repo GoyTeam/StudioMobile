@@ -41,6 +41,9 @@ public final class EngineActivity extends Activity {
     private TextView loadingStatus, docTabTitle;
     private ViewCubeView viewCube;
     private DiagnosticsOverlayView diagHud;
+    private View topStudioBar;
+    private FrameLayout customGuiLayer;
+    private RobloxPlayUi robloxPlayUi;
     private LinearLayout ribbonTabsBar;
     private String activeRibbonTab = "HOME";
     private int viewCubePreset = 0;
@@ -55,8 +58,9 @@ public final class EngineActivity extends Activity {
     private final Runnable healthPoll = new Runnable() {
         @Override public void run() {
             if (diagHud != null && diagHud.getVisibility() == View.VISIBLE) diagHud.update(scene);
-            if (scene.playing && healthLabel != null) {
-                healthLabel.setText("HP " + (int) Math.round(scene.charHealth) + "/" + (int) Math.round(scene.charMaxHealth));
+            if (scene.playing) {
+                if (robloxPlayUi != null) robloxPlayUi.refreshHud();
+                if (healthLabel != null) healthLabel.setText("HP " + (int) Math.round(scene.charHealth) + "/" + (int) Math.round(scene.charMaxHealth));
                 if (camModePill != null) camModePill.setText(scene.firstPerson ? "1P" : "3P");
                 uiHandler.postDelayed(this, 180);
             } else if (diagHud != null && diagHud.getVisibility() == View.VISIBLE) {
@@ -253,7 +257,8 @@ public final class EngineActivity extends Activity {
         FrameLayout outer = new FrameLayout(this);
         LinearLayout root = col();
         root.setBackgroundColor(PANEL);
-        root.addView(buildTopBar(), lp(-1, dp(38)));
+        topStudioBar = buildTopBar();
+        root.addView(topStudioBar, lp(-1, dp(38)));
         root.addView(line(), lp(-1, dp(1)));
         root.addView(buildDocTabStrip(), lp(-1, dp(26)));
         root.addView(line(), lp(-1, dp(1)));
@@ -823,15 +828,28 @@ public final class EngineActivity extends Activity {
         lightBtn.setBackground(shape(0xFF343C4D, 8));
         lightBtn.setOnClickListener(v -> showLightingQuickMenu());
         hudRow.addView(lightBtn, margin(dp(6), 0, -2, -2));
-        FrameLayout.LayoutParams hudLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
-        hudLp.setMargins(dp(10), dp(10), 0, 0);
-        layer.addView(hudRow, hudLp);
+        // Full-screen custom StarterGui / PlayerGui UDim2 layer
+        customGuiLayer = new FrameLayout(this);
+        layer.addView(customGuiLayer, new FrameLayout.LayoutParams(-1, -1));
+
+        // Authentic Roblox Client Experience Controls (TopBar, Settings Menu, Chat, Health Bar)
+        robloxPlayUi = new RobloxPlayUi(this, scene, new RobloxPlayUi.Callbacks() {
+            @Override public void onStopPlay() { stopPlay(); }
+            @Override public void onToggleDiagnostics() {
+                if (diagHud == null) return;
+                boolean show = diagHud.getVisibility() != View.VISIBLE;
+                diagHud.setVisibility(show ? View.VISIBLE : View.GONE);
+                if (show) diagHud.update(scene);
+            }
+            @Override public boolean isDiagnosticsVisible() { return diagHud != null && diagHud.getVisibility() == View.VISIBLE; }
+            @Override public void onLightingChanged() { scene.logOutput("info", "Lighting: " + scene.lighting.summary()); }
+            @Override public void onRigChanged() { scene.logOutput("info", "Avatar rig: " + (scene.avatar != null && scene.avatar.isR15 ? "R15" : "R6")); }
+        });
+        layer.addView(robloxPlayUi.root, new FrameLayout.LayoutParams(-1, -1));
 
         guiOverlay = col();
-        guiOverlay.setGravity(Gravity.CENTER_HORIZONTAL);
-        FrameLayout.LayoutParams guiLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
-        guiLp.setMargins(0, dp(10), dp(12), 0);
-        layer.addView(guiOverlay, guiLp);
+        guiOverlay.setVisibility(View.GONE);
+        layer.addView(guiOverlay, new FrameLayout.LayoutParams(-2, -2));
 
         jumpButton = roundButton("▲", () -> { scene.jumpQueued = true; viewport.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); });
         FrameLayout.LayoutParams jump = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.RIGHT);
@@ -856,15 +874,7 @@ public final class EngineActivity extends Activity {
     }
 
     private void rebuildPlayGui() {
-        if (guiOverlay == null) return;
-        guiOverlay.removeAllViews();
-        if (!scene.playing || scene.root == null) return;
-        Instance starterGui = scene.root.findFirst("StarterGui");
-        if (starterGui == null) return;
-        for (Instance child : starterGui.children) {
-            if (!"ScreenGui".equals(child.className) || !child.getBool("Enabled", true)) continue;
-            renderGuiChildren(child);
-        }
+        if (customGuiLayer != null) RobloxGuiRenderer.render(this, customGuiLayer, scene);
     }
 
     private void renderGuiChildren(Instance parent) {
@@ -1067,6 +1077,7 @@ public final class EngineActivity extends Activity {
                 String apiKey = null;
                 try { apiKey = cv.load(); } catch (Throwable ignored) { }
                 String cookie = cv.loadCookie();
+                RobloxAnimations.loadBundledOfficialClips(this);
                 RobloxAnimations.setSessionCookie(cookie);
                 // Fetch official Roblox R6 & R15 KeyframeSequence animations in background
                 RobloxAnimations.loadFromRobloxAsync(getCacheDir(), apiKey, (lvl, msg) -> scene.logOutput(lvl, msg));
@@ -2039,6 +2050,8 @@ public final class EngineActivity extends Activity {
         if (viewCube != null) viewCube.setVisibility(View.GONE);
         if (bottomCmdBar != null) bottomCmdBar.setVisibility(View.GONE);
         if (docTabStrip != null) docTabStrip.setVisibility(View.GONE);
+        if (topStudioBar != null) topStudioBar.setVisibility(View.GONE);
+        if (robloxPlayUi != null) robloxPlayUi.refreshHud();
         scene.startPlay();
         playControls.setVisibility(View.VISIBLE);
         if (liftPad != null) liftPad.setVisibility(View.GONE);
@@ -2068,6 +2081,8 @@ public final class EngineActivity extends Activity {
         if (viewCube != null) viewCube.setVisibility(View.VISIBLE);
         if (bottomCmdBar != null) bottomCmdBar.setVisibility(View.VISIBLE);
         if (docTabStrip != null) docTabStrip.setVisibility(View.VISIBLE);
+        if (topStudioBar != null) topStudioBar.setVisibility(View.VISIBLE);
+        if (customGuiLayer != null) customGuiLayer.removeAllViews();
         if (liftPad != null) liftPad.setVisibility(View.VISIBLE);
         flyControls.setVisibility(View.VISIBLE);
         playLabel.setText("Play");

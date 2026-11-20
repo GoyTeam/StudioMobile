@@ -29,6 +29,8 @@ final class RobloxAnimations {
     static final class JointSample {
         float rx, ry, rz;
         float ty;
+        int easingStyle = 0;     // 0=Linear, 1=Constant, 2=Elastic, 3=Cubic, 4=Bounce, 5=CubicV2
+        int easingDirection = 0; // 0=In, 1=Out, 2=InOut
     }
 
     static final class Frame {
@@ -163,6 +165,64 @@ final class RobloxAnimations {
     private static volatile int loadedCount = 0;
     private static volatile String activeCookie = null;
     static void setSessionCookie(String cookie) { activeCookie = cookie; }
+
+    /** Loads the bundled real official Roblox .rbxm R15 KeyframeSequences from APK assets (instant, works 100% offline). */
+    static void loadBundledOfficialClips(android.content.Context ctx) {
+        if (ctx == null) return;
+        String[][] bundled = {
+            {"r15_idle", "anims/r15_idle.rbxm"},
+            {"r15_walk", "anims/r15_walk.rbxm"},
+            {"r15_run",  "anims/r15_run.rbxm"}
+        };
+        File tmpDir = new File(ctx.getCacheDir(), "rbx_anims_bundled");
+        if (!tmpDir.exists()) tmpDir.mkdirs();
+        for (String[] pair : bundled) {
+            try {
+                File out = new File(tmpDir, pair[0] + ".rbxm");
+                if (!out.exists() || out.length() < 32) {
+                    try (InputStream in = ctx.getAssets().open(pair[1]); FileOutputStream fos = new FileOutputStream(out)) {
+                        byte[] buf = new byte[8192];
+                        int n;
+                        while ((n = in.read(buf)) != -1) fos.write(buf, 0, n);
+                    }
+                }
+                Clip c = decodeClip(pair[0], 0L, true, out);
+                if (c != null && !c.frames.isEmpty()) CLIPS.put(pair[0], c);
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    /** Exact Roblox PoseEasingStyle + PoseEasingDirection curve evaluation (from rbx_animation/easing.rs). */
+    private static float easeCurve(int style, float t) {
+        if (style == 1) return 0f; // Constant
+        if (style == 3 || style == 5) return t * t * t; // Cubic / CubicV2
+        if (style == 2) { // Elastic
+            if (t <= 0f) return 0f;
+            if (t >= 1f) return 1f;
+            return (float) (-Math.pow(2.0, 10.0 * (t - 1.0)) * Math.sin((t - 1.075) * (2.0 * Math.PI) / 0.3));
+        }
+        if (style == 4) { // Bounce
+            float x = 1f - t;
+            float b;
+            if (x < 1f / 2.75f) b = 7.5625f * x * x;
+            else if (x < 2f / 2.75f) { x -= 1.5f / 2.75f; b = 7.5625f * x * x + 0.75f; }
+            else if (x < 2.5f / 2.75f) { x -= 2.25f / 2.75f; b = 7.5625f * x * x + 0.9375f; }
+            else { x -= 2.625f / 2.75f; b = 7.5625f * x * x + 0.984375f; }
+            return 1f - b;
+        }
+        return t; // Linear
+    }
+
+    private static float applyPoseEasing(int style, int dir, float t) {
+        if (style == 1) {
+            if (dir == 0) return t > 0f ? 1f : 0f;
+            if (dir == 2) return t >= 0.5f ? 1f : 0f;
+            return 0f;
+        }
+        if (dir == 1) return 1f - easeCurve(style, 1f - t); // Out
+        if (dir == 2) return t < 0.5f ? 0.5f * easeCurve(style, t * 2f) : 1f - 0.5f * easeCurve(style, (1f - t) * 2f); // InOut
+        return easeCurve(style, t); // In
+    }
 
     static int loadedClipCount() { return loadedCount; }
 
@@ -453,6 +513,8 @@ final class RobloxAnimations {
                     js.rx = (float) Math.atan2(r21, r11);
                     js.rz = 0f;
                 }
+                js.easingStyle = node.getInt("EasingStyle", 0);
+                js.easingDirection = node.getInt("EasingDirection", 0);
                 out.put(node.name, js);
             }
         }
@@ -598,10 +660,11 @@ final class RobloxAnimations {
         if (ja == null && jb == null) return out;
         if (ja == null) return jb;
         if (jb == null) return ja;
-        out.rx = ja.rx + (jb.rx - ja.rx) * t;
-        out.ry = ja.ry + (jb.ry - ja.ry) * t;
-        out.rz = ja.rz + (jb.rz - ja.rz) * t;
-        out.ty = ja.ty + (jb.ty - ja.ty) * t;
+        float e = applyPoseEasing(ja.easingStyle, ja.easingDirection, t);
+        out.rx = ja.rx + (jb.rx - ja.rx) * e;
+        out.ry = ja.ry + (jb.ry - ja.ry) * e;
+        out.rz = ja.rz + (jb.rz - ja.rz) * e;
+        out.ty = ja.ty + (jb.ty - ja.ty) * e;
         return out;
     }
 }

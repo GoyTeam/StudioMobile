@@ -35,6 +35,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
 
     private final EngineScene scene;
     private final EngineTextures textures;
+    private final RbxMeshDecoder meshDecoder;
     private final ErrorReport report;
     private final ArrayList<Instance> frameList = new ArrayList<>();
     private boolean stopped;
@@ -77,7 +78,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "uniform float uRough; uniform float uMetal; uniform float uEmissive; uniform float uShininess;\n" +
             "uniform float uSpecular;\n" +
             "uniform vec3 uFogColor; uniform vec2 uFogRange; uniform float uFogEnabled;\n" +
-            "uniform vec3 uLightPos[4]; uniform vec3 uLightColor[4]; uniform vec3 uLightDir[4]; uniform vec4 uLightParams[4];\n" +
+            "uniform vec3 uLightPos[12]; uniform vec3 uLightColor[12]; uniform vec3 uLightDir[12]; uniform vec4 uLightParams[12];\n" +
             "uniform int uLightCount;\n" +
             "uniform sampler2D uAtlas; uniform float uAtlasStep; uniform vec4 uFaceTiles[6];\n" +
             "uniform vec4 uSpawnTile; uniform float uIsSpawn; uniform float uIsBaseplate;\n" +
@@ -129,17 +130,21 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             "  vec3 skyAmbient = mix(uAmbient * 0.72 + vec3(0.07, 0.07, 0.08), uAmbient * 0.98 + vec3(0.12, 0.15, 0.21), hemi) + envIbl * uEnvDiffuse * 0.48;\n" +
             "  float ndl = max(dot(n, uSunDir), 0.0);\n" +
             "  float shadow = uTechLevel >= 1.5 ? calcShadow(vShadowPos, ndl) : 0.0;\n" +
-            "  vec3 light = skyAmbient + uSunColor * ndl * uSunGain * 0.96 * (1.0 - shadow * 0.76);\n" +
+            "  float moonNdl = max(dot(n, -uSunDir), 0.0);\n" +
+            "  float nightFactor = clamp(1.0 - uSunGain * 1.4, 0.0, 1.0);\n" +
+            "  vec3 moonFill = vec3(0.24, 0.34, 0.56) * moonNdl * nightFactor * 0.42;\n" +
+            "  vec3 light = skyAmbient + moonFill + uSunColor * ndl * uSunGain * 0.96 * (1.0 - shadow * 0.76);\n" +
             "  light += uShiftTop * ndl * 0.42 + uShiftBottom * (1.0 - ndl) * 0.32;\n" +
             "  vec3 view = normalize(uEye - vWorld);\n" +
             "  vec3 localSpec = vec3(0.0);\n" +
-            "  for (int i = 0; i < 4; i++) {\n" +
+            "  for (int i = 0; i < 12; i++) {\n" +
             "    float used = i < uLightCount ? 1.0 : 0.0;\n" +
             "    vec3 toLight = uLightPos[i] - vWorld;\n" +
             "    float dist = length(toLight);\n" +
             "    vec3 l = toLight / max(dist, 0.0001);\n" +
-            "    float atten = clamp(1.0 - dist / max(uLightParams[i].x, 0.001), 0.0, 1.0);\n" +
-            "    atten *= atten;\n" +
+            "    float ratio = clamp(dist / max(uLightParams[i].x, 0.001), 0.0, 1.0);\n" +
+            "    float atten = (1.0 - ratio * ratio);\n" +
+            "    atten = atten * atten * (1.0 / (1.0 + 0.045 * dist));\n" +
             "    float cone = 1.0;\n" +
             "    if (uLightParams[i].y < 0.999) {\n" +
             "      float cd = dot(-l, normalize(uLightDir[i]));\n" +
@@ -350,9 +355,10 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
     private static final float[] TORSO = {0.05f, 0.41f, 0.82f};
     private static final float[] LIMB = {0.64f, 0.74f, 0.28f};
 
-    EngineRenderer(EngineScene scene, EngineTextures textures, ErrorReport report) {
+    EngineRenderer(EngineScene scene, EngineTextures textures, RbxMeshDecoder meshDecoder, ErrorReport report) {
         this.scene = scene;
         this.textures = textures;
+        this.meshDecoder = meshDecoder;
         this.report = report;
     }
 
@@ -892,8 +898,17 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         if (uAtmoDec >= 0) GLES20.glUniform3f(uAtmoDec, (float) light.atmosphereDecayColor[0], (float) light.atmosphereDecayColor[1], (float) light.atmosphereDecayColor[2]);
         if (uAtmoParams >= 0) GLES20.glUniform4f(uAtmoParams, light.atmosphere ? (float) light.atmosphereDensity : 0f, (float) light.atmosphereOffset, (float) light.atmosphereHaze, (float) light.atmosphereGlare);
 
+        final double refX = scene.playing ? scene.charPos[0] : scene.camTarget[0];
+        final double refY = scene.playing ? scene.charPos[1] : scene.camTarget[1];
+        final double refZ = scene.playing ? scene.charPos[2] : scene.camTarget[2];
+        ArrayList<EngineLighting.Light> sortedLights = new ArrayList<>(light.lights);
+        java.util.Collections.sort(sortedLights, (a, b) -> {
+            double da = (a.position[0] - refX) * (a.position[0] - refX) + (a.position[1] - refY) * (a.position[1] - refY) + (a.position[2] - refZ) * (a.position[2] - refZ);
+            double db = (b.position[0] - refX) * (b.position[0] - refX) + (b.position[1] - refY) * (b.position[1] - refY) + (b.position[2] - refZ) * (b.position[2] - refZ);
+            return Double.compare(da, db);
+        });
         int count = 0;
-        for (EngineLighting.Light local : light.lights) {
+        for (EngineLighting.Light local : sortedLights) {
             if (count >= MAX_LIGHTS) break;
             lightPos[count * 3] = (float) local.position[0];
             lightPos[count * 3 + 1] = (float) local.position[1];
@@ -946,7 +961,7 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         float sl = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
         sx /= sl; sy /= sl; sz /= sl;
         Matrix.setLookAtM(mLightView, 0, cx + sx * 90f, cy + sy * 90f, cz + sz * 90f, cx, cy, cz, 0f, 1f, 0f);
-        Matrix.orthoM(mLightProj, 0, -34f, 34f, -34f, 34f, 10f, 200f);
+        Matrix.orthoM(mLightProj, 0, -48f, 48f, -48f, 48f, 8f, 240f);
         Matrix.multiplyMM(mLightVp, 0, mLightProj, 0, mLightView, 0);
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, shadowFbo);
@@ -1203,6 +1218,27 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
             int tile = textures.spawnTile();
             setTileUniform(uSpawnTile, tile, textures.tileStuds(tile));
         }
+        if (meshDecoder != null) {
+            String meshId = null;
+            if ("MeshPart".equals(part.className)) {
+                meshId = content(part, "MeshId");
+                if (meshId == null) meshId = content(part, "MeshID");
+            } else {
+                for (Instance ch : part.children) {
+                    if ("SpecialMesh".equals(ch.className)) {
+                        meshId = content(ch, "MeshId");
+                        break;
+                    }
+                }
+            }
+            if (meshId != null && !meshId.isEmpty()) {
+                RbxMeshDecoder.GlMesh gm = meshDecoder.getGlMesh(meshId);
+                if (gm != null) {
+                    drawRbxMesh(gm, assetTexture, light);
+                    return;
+                }
+            }
+        }
         int meshKind = 1;
         if ("WedgePart".equals(part.className) || "CornerWedgePart".equals(part.className)) meshKind = 3;
         else if ("Part".equals(part.className)) {
@@ -1255,6 +1291,27 @@ final class EngineRenderer implements GLSurfaceView.Renderer {
         normal3[0] = r00; normal3[1] = r10; normal3[2] = r20;
         normal3[3] = r01; normal3[4] = r11; normal3[5] = r21;
         normal3[6] = r02; normal3[7] = r12; normal3[8] = r22;
+    }
+
+    private void drawRbxMesh(RbxMeshDecoder.GlMesh gm, int assetTex, EngineLighting light) {
+        GLES20.glUseProgram(avatarProgram);
+        GLES20.glUniformMatrix4fv(avMvp, 1, false, mMvp, 0);
+        GLES20.glUniformMatrix3fv(avNormal, 1, false, normal3, 0);
+        GLES20.glUniform3f(avSunDir, (float) light.sunDirection[0], (float) light.sunDirection[1], (float) light.sunDirection[2]);
+        GLES20.glUniform3f(avSunColor, (float) light.sunColor[0], (float) light.sunColor[1], (float) light.sunColor[2]);
+        GLES20.glUniform1f(avSunGain, (float) light.sunGain);
+        GLES20.glUniform3f(avAmbient, (float) light.ambientDiffuse[0], (float) light.ambientDiffuse[1], (float) light.ambientDiffuse[2]);
+        GLES20.glUniform1i(avTex, 0);
+        if (assetTex != 0) { bindTexture(0, assetTex); GLES20.glUniform1f(avHasTex, 1f); }
+        else GLES20.glUniform1f(avHasTex, 0f);
+        GLES20.glEnableVertexAttribArray(avPos);
+        GLES20.glVertexAttribPointer(avPos, 3, GLES20.GL_FLOAT, false, 0, gm.pos);
+        if (avNorm >= 0) { GLES20.glEnableVertexAttribArray(avNorm); GLES20.glVertexAttribPointer(avNorm, 3, GLES20.GL_FLOAT, false, 0, gm.norm); }
+        if (avUv >= 0) { GLES20.glEnableVertexAttribArray(avUv); GLES20.glVertexAttribPointer(avUv, 2, GLES20.GL_FLOAT, false, 0, gm.uv); }
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, gm.count);
+        GLES20.glDisableVertexAttribArray(avPos);
+        if (avNorm >= 0) GLES20.glDisableVertexAttribArray(avNorm);
+        if (avUv >= 0) GLES20.glDisableVertexAttribArray(avUv);
     }
 
     private void drawBox(float r, float g, float b, float alpha, EngineMaterial material, double specular,

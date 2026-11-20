@@ -362,8 +362,17 @@ final class PlaceDecoder {
             case 0x03: { int[] v = c.interleavedI32(count); for (int i = 0; i < count; i++) out[i] = v[i]; return out; }  // Int32
             case 0x04: { float[] v = c.interleavedF32(count); for (int i = 0; i < count; i++) out[i] = v[i]; return out; } // Float32
             case 0x05: for (int i = 0; i < count; i++) out[i] = c.f64(); return out;                   // Float64 (little-endian, in order)
-            case 0x06: c.skip(count * 8); return out;                                                  // UDim: f32 array + i32 array
-            case 0x07: c.skip(count * 16); return out;                                                 // UDim2
+            case 0x06: {                                                                               // UDim (rbx-dom spec): Scale f32 + Offset i32
+                float[] sc = c.interleavedF32(count); int[] of = c.interleavedI32(count);
+                for (int i = 0; i < count; i++) out[i] = new double[]{sc[i], of[i]};
+                return out;
+            }
+            case 0x07: {                                                                               // UDim2 (rbx-dom spec): XS, YS f32 + XO, YO i32
+                float[] xs = c.interleavedF32(count), ys = c.interleavedF32(count);
+                int[] xo = c.interleavedI32(count), yo = c.interleavedI32(count);
+                for (int i = 0; i < count; i++) out[i] = new double[]{xs[i], xo[i], ys[i], yo[i]};
+                return out;
+            }
             case 0x08: c.skip(count * 24); return out;                                                 // Ray: six floats per value
             case 0x09: case 0x0A: c.skip(count); return out;                                           // Faces, Axes: one byte each
             case 0x0B: c.skip(count * 4); return out;                                                  // BrickColor
@@ -372,7 +381,11 @@ final class PlaceDecoder {
                 for (int i = 0; i < count; i++) out[i] = new int[]{toByte(red[i]), toByte(green[i]), toByte(blue[i])};
                 return out;
             }
-            case 0x0D: c.skip(count * 8); return out;                                                  // Vector2
+            case 0x0D: {                                                                               // Vector2 (rbx-dom spec): X, Y f32 planes
+                float[] vx = c.interleavedF32(count), vy = c.interleavedF32(count);
+                for (int i = 0; i < count; i++) out[i] = new double[]{vx[i], vy[i]};
+                return out;
+            }
             case 0x0E: {                                                                               // Vector3: three f32 planes
                 float[] x = c.interleavedF32(count), y = c.interleavedF32(count), z = c.interleavedF32(count);
                 for (int i = 0; i < count; i++) out[i] = new Instance.Vector3(x[i], y[i], z[i]);
@@ -424,10 +437,14 @@ final class PlaceDecoder {
             }
             case 0x17: c.skip(count * 8); return out;                                                  // NumberRange
             case 0x18: c.skip(count * 16); return out;                                                 // Rect: four f32 planes
-            case 0x19: {                                                                               // PhysicalProperties: discriminator byte + optional custom floats
+            case 0x19: {                                                                               // PhysicalProperties (rbx-dom spec): density, friction, elasticity, weights
                 for (int i = 0; i < count; i++) {
                     int discriminator = c.u8();
-                    if ((discriminator & 0b01) != 0) c.skip((discriminator & 0b10) != 0 ? 24 : 20);
+                    if ((discriminator & 0b01) != 0) {
+                        double d = c.f32(), fr = c.f32(), el = c.f32(), fw = c.f32(), ew = c.f32();
+                        if ((discriminator & 0b10) != 0) c.f32(); // optional AudioAbsorption
+                        out[i] = new double[]{d, fr, el, fw, ew};
+                    }
                 }
                 return out;
             }
