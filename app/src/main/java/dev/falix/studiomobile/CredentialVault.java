@@ -24,6 +24,20 @@ final class CredentialVault {
         String value=prefs.getString("cipher",null);if(value==null)return null;
         Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.DECRYPT_MODE,key(false),new GCMParameterSpec(128,Base64.decode(prefs.getString("iv",""),Base64.NO_WRAP)));return new String(cipher.doFinal(Base64.decode(value,Base64.NO_WRAP)),"UTF-8");
     }
+    void saveCookie(String cookie) throws Exception {
+        Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.ENCRYPT_MODE,key(true));byte[] encrypted=cipher.doFinal(cookie.getBytes("UTF-8"));
+        if(!prefs.edit().putString("cookie_iv",Base64.encodeToString(cipher.getIV(),Base64.NO_WRAP)).putString("cookie_cipher",Base64.encodeToString(encrypted,Base64.NO_WRAP)).commit())throw new java.io.IOException("Unable to persist encrypted Roblox session.");
+    }
+    String loadCookie() {
+        try {
+            String value=prefs.getString("cookie_cipher",null);if(value==null)return null;
+            Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.DECRYPT_MODE,key(false),new GCMParameterSpec(128,Base64.decode(prefs.getString("cookie_iv",""),Base64.NO_WRAP)));
+            return new String(cipher.doFinal(Base64.decode(value,Base64.NO_WRAP)),"UTF-8");
+        } catch (Throwable ignored) { return null; }
+    }
+    void clearCookie() {
+        prefs.edit().remove("cookie_iv").remove("cookie_cipher").commit();
+    }
     void clear() throws Exception {
         prefs.edit().clear().commit();KeyStore ks=KeyStore.getInstance("AndroidKeyStore");ks.load(null);if(ks.containsAlias(ALIAS))ks.deleteEntry(ALIAS);
     }

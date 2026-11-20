@@ -161,6 +161,8 @@ final class RobloxAnimations {
     }
     private static volatile boolean loadingStarted = false;
     private static volatile int loadedCount = 0;
+    private static volatile String activeCookie = null;
+    static void setSessionCookie(String cookie) { activeCookie = cookie; }
 
     static int loadedClipCount() { return loadedCount; }
 
@@ -355,10 +357,14 @@ final class RobloxAnimations {
             for (int r = 0; r < 6; r++) {
                 URL u = new URL(cur);
                 if (!RobloxApi.imageHost(u)) return false;
-                okhttp3.Request req = new okhttp3.Request.Builder()
+                okhttp3.Request.Builder rb = new okhttp3.Request.Builder()
                         .url(cur)
-                        .header("User-Agent", "Roblox/WinInet")
-                        .get().build();
+                        .header("User-Agent", "Roblox/WinInet");
+                String ck = activeCookie;
+                if (ck != null && !ck.isEmpty() && u.getHost().toLowerCase(Locale.US).endsWith(".roblox.com")) {
+                    rb.header("Cookie", ".ROBLOSECURITY=" + ck);
+                }
+                okhttp3.Request req = rb.get().build();
                 try (okhttp3.Response res = NetworkRuntime.client().newCall(req).execute()) {
                     if (res.code() >= 300 && res.code() < 400) {
                         String next = res.header("Location");

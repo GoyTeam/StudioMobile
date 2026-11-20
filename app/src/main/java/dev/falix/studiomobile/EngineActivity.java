@@ -40,6 +40,7 @@ public final class EngineActivity extends Activity {
     private View loadingOverlay, bottomCmdBar, docTabStrip;
     private TextView loadingStatus, docTabTitle;
     private ViewCubeView viewCube;
+    private DiagnosticsOverlayView diagHud;
     private LinearLayout ribbonTabsBar;
     private String activeRibbonTab = "HOME";
     private int viewCubePreset = 0;
@@ -53,10 +54,13 @@ public final class EngineActivity extends Activity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable healthPoll = new Runnable() {
         @Override public void run() {
+            if (diagHud != null && diagHud.getVisibility() == View.VISIBLE) diagHud.update(scene);
             if (scene.playing && healthLabel != null) {
                 healthLabel.setText("HP " + (int) Math.round(scene.charHealth) + "/" + (int) Math.round(scene.charMaxHealth));
                 if (camModePill != null) camModePill.setText(scene.firstPerson ? "1P" : "3P");
                 uiHandler.postDelayed(this, 180);
+            } else if (diagHud != null && diagHud.getVisibility() == View.VISIBLE) {
+                uiHandler.postDelayed(this, 250);
             }
         }
     };
@@ -459,6 +463,63 @@ public final class EngineActivity extends Activity {
         }).start();
     }
 
+    private void searchCreatorStore(String query) {
+        if (query == null || query.trim().isEmpty()) {
+            Toast.makeText(this, "Enter a keyword (e.g. car, house, sword)", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Toast.makeText(this, "Searching Roblox Creator Store…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                CredentialVault cv = new CredentialVault(this);
+                String cookie = cv.loadCookie();
+                String apiKey = null;
+                try { apiKey = cv.load(); } catch (Throwable ignored) { }
+                RobloxApi api = new RobloxApi();
+                ArrayList<RobloxApi.ToolboxModel> results = api.searchToolboxModels(query.trim(), cookie);
+                final String fKey = apiKey, fCookie = cookie;
+                runOnUiThread(() -> {
+                    if (results.isEmpty()) {
+                        Toast.makeText(this, "No Creator Store models found for '" + query.trim() + "'", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    String[] names = new String[results.size()];
+                    for (int i = 0; i < results.size(); i++) names[i] = results.get(i).name + "  (#" + results.get(i).assetId + ")";
+                    new AlertDialog.Builder(this).setTitle("Creator Store: " + query.trim()).setItems(names, (d, which) -> {
+                        RobloxApi.ToolboxModel chosen = results.get(which);
+                        Toast.makeText(this, "Inserting " + chosen.name + "…", Toast.LENGTH_SHORT).show();
+                        new Thread(() -> {
+                            File tmp = null;
+                            try {
+                                tmp = api.downloadAssetWithAuth(chosen.assetId, fKey, fCookie, getCacheDir());
+                                PlaceDecoder.Result dec = PlaceDecoder.decode(tmp);
+                                runOnUiThread(() -> {
+                                    if (dec != null && dec.root != null && scene.workspace != null) {
+                                        Instance model = new Instance("Model", chosen.name);
+                                        for (Instance ch : new ArrayList<>(dec.root.children)) {
+                                            dec.root.children.remove(ch);
+                                            model.add(ch);
+                                        }
+                                        scene.workspace.add(model);
+                                        scene.selection = model;
+                                        scene.markDirty();
+                                        scene.refreshCache();
+                                        refresh();
+                                        scene.logOutput("info", "Inserted Creator Store model: " + chosen.name + " (#" + chosen.assetId + ")");
+                                    }
+                                });
+                            } catch (Throwable err) {
+                                runOnUiThread(() -> Toast.makeText(this, "Insert failed: " + RobloxApi.safe(err), Toast.LENGTH_LONG).show());
+                            } finally { if (tmp != null) tmp.delete(); }
+                        }, "InsertCreatorModel").start();
+                    }).show();
+                });
+            } catch (Throwable err) {
+                runOnUiThread(() -> Toast.makeText(this, "Creator Store search failed: " + RobloxApi.safe(err), Toast.LENGTH_LONG).show());
+            }
+        }, "CreatorStoreSearch").start();
+    }
+
     private void showLightingQuickMenu() {
         String[] items = {
             "Technology: Future (PBR + Local Specular)",
@@ -470,7 +531,8 @@ public final class EngineActivity extends Activity {
             "Time: Warm Sunset (17:45)",
             "Time: Starry Night (22:00)",
             "Toggle GlobalShadows",
-            "Toggle Atmospheric Haze"
+            "Toggle Atmospheric Haze",
+            "Toggle FPS / Diagnostics HUD"
         };
         new AlertDialog.Builder(this).setTitle("Roblox Lighting").setItems(items, (d, which) -> {
             Instance lighting = scene.root == null ? null : scene.root.findFirst("Lighting");
@@ -498,6 +560,11 @@ public final class EngineActivity extends Activity {
                 } else {
                     lighting.children.remove(atmo);
                 }
+            } else if (which == 10 && diagHud != null) {
+                boolean show = diagHud.getVisibility() != View.VISIBLE;
+                diagHud.setVisibility(show ? View.VISIBLE : View.GONE);
+                if (show) { diagHud.update(scene); uiHandler.removeCallbacks(healthPoll); uiHandler.post(healthPoll); }
+                return;
             }
             scene.markDirty();
             scene.refreshCache();
@@ -673,6 +740,12 @@ public final class EngineActivity extends Activity {
         cubeLp.setMargins(0, dp(6), dp(8), 0);
         viewportLayer.addView(viewCube, cubeLp);
 
+        diagHud = new DiagnosticsOverlayView(this);
+        diagHud.setVisibility(View.GONE);
+        FrameLayout.LayoutParams diagLp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        diagLp.setMargins(0, 0, 0, dp(34));
+        viewportLayer.addView(diagHud, diagLp);
+
         FrameLayout.LayoutParams errorParams = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
         errorParams.setMargins(0, dp(74), dp(8), 0);
         viewportLayer.addView(rendererError, errorParams);
@@ -824,6 +897,25 @@ public final class EngineActivity extends Activity {
         panel.addView(head, lp(-1, dp(32)));
         panel.addView(line(), lp(-1, dp(1)));
 
+        LinearLayout mktRow = row();
+        mktRow.setGravity(Gravity.CENTER_VERTICAL);
+        mktRow.setPadding(dp(8), dp(6), dp(8), dp(2));
+        EditText mktSearch = new EditText(this);
+        mktSearch.setSingleLine(true);
+        mktSearch.setTextSize(10.5f * ui());
+        mktSearch.setTextColor(TEXT);
+        mktSearch.setHintTextColor(MUTED);
+        mktSearch.setHint("Search Roblox Creator Store…");
+        mktSearch.setBackground(shape(CANVAS, 6));
+        mktSearch.setPadding(dp(8), dp(4), dp(8), dp(4));
+        mktRow.addView(mktSearch, lp(0, dp(30), 1));
+        TextView mktGo = text("Find", 10f, true, 0xFFFFFFFF);
+        mktGo.setPadding(dp(10), dp(6), dp(10), dp(6));
+        mktGo.setBackground(shape(ACCENT, 6));
+        mktGo.setOnClickListener(v -> searchCreatorStore(mktSearch.getText().toString()));
+        mktRow.addView(mktGo, margin(dp(6), 0, -2, -2));
+        panel.addView(mktRow);
+
         HorizontalScrollView catsScroll = new HorizontalScrollView(this);
         catsScroll.setHorizontalScrollBarEnabled(false);
         LinearLayout catsRow = row();
@@ -971,8 +1063,11 @@ public final class EngineActivity extends Activity {
     private void loadAvatarAsync() {
         Thread t = new Thread(() -> {
             try {
+                CredentialVault cv = new CredentialVault(this);
                 String apiKey = null;
-                try { apiKey = new CredentialVault(this).load(); } catch (Throwable ignored) { }
+                try { apiKey = cv.load(); } catch (Throwable ignored) { }
+                String cookie = cv.loadCookie();
+                RobloxAnimations.setSessionCookie(cookie);
                 // Fetch official Roblox R6 & R15 KeyframeSequence animations in background
                 RobloxAnimations.loadFromRobloxAsync(getCacheDir(), apiKey, (lvl, msg) -> scene.logOutput(lvl, msg));
 
@@ -987,7 +1082,7 @@ public final class EngineActivity extends Activity {
                     sp.edit().putLong("lastUserId", uid).putString("lastUsername", uname).apply();
                 }
                 if (uid > 0) {
-                    AvatarProfile av = AvatarProfile.fetchForUser(api, apiKey, uid, uname);
+                    AvatarProfile av = AvatarProfile.fetchForUser(api, apiKey, cookie, uid, uname);
                     scene.avatar = av;
                     RobloxAnimations.loadCustomFromProfileAsync(getCacheDir(), apiKey, av, (lvl, msg) -> scene.logOutput(lvl, msg));
                     scene.use3dAvatar = true;

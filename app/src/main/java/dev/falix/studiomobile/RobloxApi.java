@@ -13,14 +13,24 @@ public final class RobloxApi {
         public final int status;
         public ApiException(int status, String message) { super(message); this.status = status; }
     }
+    public static final class ToolboxModel {
+        public final long assetId;
+        public final String name;
+        public ToolboxModel(long assetId, String name) { this.assetId = assetId; this.name = name; }
+    }
     public static final class Session {
-        public final String key, username, displayName, avatar;
+        public final String key, cookie, username, displayName, avatar;
         public final long userId;
         public final JSONObject introspection;
         Session(String k, long id, JSONObject profile, String image, JSONObject info) {
-            key=k; userId=id; username=profile.optString("name"); displayName=profile.optString("displayName",username); avatar=image; introspection=info;
+            this(k, null, id, profile, image, info);
         }
+        Session(String k, String c, long id, JSONObject profile, String image, JSONObject info) {
+            key=k; cookie=c; userId=id; username=profile.optString("name"); displayName=profile.optString("displayName",username); avatar=image; introspection=info==null?new JSONObject():info;
+        }
+        public boolean hasCookie() { return cookie != null && !cookie.isEmpty(); }
         public boolean canDownload() {
+            if (hasCookie()) return true;
             JSONArray scopes=introspection.optJSONArray("scopes");
             if(scopes!=null) for(int i=0;i<scopes.length();i++) {
                 JSONObject s=scopes.optJSONObject(i);
@@ -94,6 +104,81 @@ public final class RobloxApi {
         } catch(Exception ignored) {} // Avatar failure never invents a person or prevents authentication.
         return new Session(key,id,user,image,info);
     }
+    public JSONObject jsonWithCookie(String url, String cookie) throws IOException, JSONException {
+        URL target = new URL(url);
+        if (!"https".equals(target.getProtocol()) || !imageHost(target)) throw new IOException("Untrusted Roblox host.");
+        okhttp3.Request.Builder req = new okhttp3.Request.Builder().url(url).header("Accept", "application/json").header("User-Agent", "Mozilla/5.0");
+        if (cookie != null && !cookie.isEmpty()) req.header("Cookie", ".ROBLOSECURITY=" + cookie);
+        try (okhttp3.Response res = NetworkRuntime.client().newCall(req.build()).execute()) {
+            if (!res.isSuccessful()) throw error(res.code());
+            if (res.body() == null) throw new IOException("Empty response.");
+            try (InputStream in = res.body().byteStream()) { return new JSONObject(new String(read(in, 4 * 1024 * 1024), "UTF-8")); }
+        }
+    }
+    public Session loginWithCookie(String cookie, String optionalApiKey) throws Exception {
+        if (cookie == null || cookie.trim().isEmpty()) throw new IOException("Missing Roblox session cookie.");
+        JSONObject user = jsonWithCookie("https://users.roblox.com/v1/users/authenticated", cookie.trim());
+        long id = user.getLong("id");
+        String image = "";
+        try {
+            JSONArray thumbs = json("https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=" + id + "&size=150x150&format=Png&isCircular=true", null, null).optJSONArray("data");
+            if (thumbs != null && thumbs.length() > 0 && "Completed".equals(thumbs.getJSONObject(0).optString("state"))) image = thumbs.getJSONObject(0).optString("imageUrl", "");
+        } catch (Exception ignored) { }
+        JSONObject info = new JSONObject();
+        if (optionalApiKey != null && !optionalApiKey.trim().isEmpty()) {
+            try { info = json(ROOT + "/api-keys/v1/introspect", null, new JSONObject().put("apiKey", optionalApiKey.trim())); } catch (Exception ignored) { }
+        }
+        return new Session(optionalApiKey == null ? "" : optionalApiKey.trim(), cookie.trim(), id, user, image, info);
+    }
+    public ArrayList<ToolboxModel> searchToolboxModels(String keyword, String cookie) throws Exception {
+        ArrayList<ToolboxModel> out = new ArrayList<>();
+        String q = enc(keyword == null ? "" : keyword.trim());
+        JSONObject res = jsonWithCookie("https://apis.roblox.com/toolbox-service/v1/marketplace/10?keyword=" + q + "&num=14", cookie);
+        JSONArray data = res.optJSONArray("data");
+        if (data != null) {
+            for (int i = 0; i < data.length(); i++) {
+                JSONObject o = data.getJSONObject(i);
+                long id = o.optLong("id", 0);
+                if (id > 0) out.add(new ToolboxModel(id, o.optString("name", "Model " + id)));
+            }
+        }
+        return out;
+    }
+    public File downloadAssetWithAuth(long assetId, String apiKey, String cookie, File directory) throws Exception {
+        File tmp = File.createTempFile("rbx-asset-", ".rbxm", directory);
+        try {
+            if (cookie != null && !cookie.isEmpty()) {
+                String cur = "https://assetdelivery.roblox.com/v1/asset/?id=" + assetId;
+                for (int r = 0; r < 6; r++) {
+                    URL u = new URL(cur);
+                    if (!trustedAssetUrl(u)) throw new IOException("Untrusted redirect.");
+                    okhttp3.Request.Builder rb = new okhttp3.Request.Builder().url(cur).header("User-Agent", "Roblox/WinInet");
+                    if (u.getHost().toLowerCase(Locale.US).endsWith(".roblox.com")) rb.header("Cookie", ".ROBLOSECURITY=" + cookie);
+                    try (okhttp3.Response res = NetworkRuntime.client().newCall(rb.build()).execute()) {
+                        if (res.code() >= 300 && res.code() < 400) {
+                            String next = res.header("Location");
+                            if (next == null) throw new IOException("Missing redirect.");
+                            cur = new URL(u, next).toString();
+                            continue;
+                        }
+                        if (!res.isSuccessful() || res.body() == null) throw error(res.code());
+                        try (InputStream in = res.body().byteStream()) { copy(in, tmp); }
+                        return tmp;
+                    }
+                }
+            }
+            if (apiKey != null && !apiKey.isEmpty()) {
+                JSONObject o = json(ROOT + "/asset-delivery-api/v1/assetId/" + assetId, apiKey, null);
+                String loc = o.optString("location", "");
+                if (loc.isEmpty()) {
+                    JSONArray locs = o.optJSONArray("locations");
+                    if (locs != null && locs.length() > 0) loc = locs.getJSONObject(0).optString("location", "");
+                }
+                if (!loc.isEmpty()) { fetchAsset(loc, tmp); return tmp; }
+            }
+            throw new IOException("Sign in with Roblox Web or add an Open Cloud API key to download assets.");
+        } catch (Exception e) { tmp.delete(); throw e; }
+    }
     private void collectUniverseIds(Object node,Set<Long> ids) {
         if(node instanceof JSONObject){JSONObject o=(JSONObject)node;Iterator<String> keys=o.keys();while(keys.hasNext()){
             String k=keys.next();Object v=o.opt(k);
@@ -122,6 +207,54 @@ public final class RobloxApi {
     public Listing list(Session s,Set<Long> manual) {
         Listing result=new Listing();LinkedHashMap<Long,Experience> map=new LinkedHashMap<>();String cursor="";
         Set<String> cursors=new HashSet<>();
+        // 0. Authenticated Roblox Web Session: discovers ALL user & group experiences (Public + Private + Unlisted!)
+        if (s.hasCookie()) {
+            try {
+                String uCursor = "";
+                Set<String> uSeen = new HashSet<>();
+                do {
+                    JSONObject page = jsonWithCookie("https://develop.roblox.com/v1/user/universes?isArchived=false&limit=50&sortOrder=Desc" + (uCursor.isEmpty() ? "" : "&cursor=" + enc(uCursor)), s.cookie);
+                    JSONArray data = page.optJSONArray("data");
+                    if (data == null) break;
+                    for (int i = 0; i < data.length(); i++) {
+                        JSONObject o = data.getJSONObject(i);
+                        long uid = o.optLong("id", 0);
+                        if (uid <= 0) continue;
+                        Experience e = new Experience(uid, o.optString("name", "Experience " + uid), o.optLong("rootPlaceId", 0));
+                        e.visibility = "Public".equalsIgnoreCase(o.optString("privacyType", "")) ? "Public" : "Private";
+                        e.cloudVerified = true;
+                        map.put(e.id, e);
+                    }
+                    uCursor = page.optString("nextPageCursor", "");
+                    if ("null".equals(uCursor)) uCursor = "";
+                    if (!uCursor.isEmpty() && !uSeen.add(uCursor)) break;
+                } while (!uCursor.isEmpty());
+            } catch (Exception ignored) { }
+            try {
+                JSONArray grps = jsonWithCookie("https://develop.roblox.com/v1/user/groups/canmanage", s.cookie).optJSONArray("data");
+                if (grps != null) {
+                    for (int i = 0; i < grps.length() && i < 15; i++) {
+                        JSONObject g = grps.getJSONObject(i);
+                        long gid = g.optLong("id", 0);
+                        String gname = g.optString("name", "Group");
+                        if (gid <= 0) continue;
+                        try {
+                            JSONArray gu = jsonWithCookie("https://develop.roblox.com/v1/groups/" + gid + "/universes?isArchived=false&limit=50&sortOrder=Desc", s.cookie).optJSONArray("data");
+                            if (gu != null) for (int j = 0; j < gu.length(); j++) {
+                                JSONObject o = gu.getJSONObject(j);
+                                long uid = o.optLong("id", 0);
+                                if (uid > 0 && !map.containsKey(uid)) {
+                                    Experience e = new Experience(uid, o.optString("name") + " · " + gname, o.optLong("rootPlaceId", 0));
+                                    e.visibility = "Group";
+                                    e.cloudVerified = true;
+                                    map.put(e.id, e);
+                                }
+                            }
+                        } catch (Exception ignored) { }
+                    }
+                }
+            } catch (Exception ignored) { }
+        }
         // 1. Studio Start Page universe search (discovers Public AND Private user experiences without Universe ID)
         try {
             String sCursor = "";
@@ -230,7 +363,12 @@ public final class RobloxApi {
         return "https".equals(u.getProtocol())&&(h.equals("rbxcdn.com")||h.endsWith(".rbxcdn.com")||h.equals("roblox.com")||h.endsWith(".roblox.com"));
     }
     public File download(Session s,long placeId,File directory) throws Exception {
-        if(!s.canDownload())throw new IOException("This key needs legacy-asset:manage to download a place. See the API key guide.");
+        if(!s.canDownload())throw new IOException("Sign in with Roblox Web or add legacy-asset:manage to your API key.");
+        if((s.key==null||s.key.isEmpty())&&s.hasCookie()){
+            File tmp=downloadAssetWithAuth(placeId,null,s.cookie,directory);
+            if(!validPlace(tmp)){tmp.delete();throw new IOException("Roblox returned a non-place file.");}
+            return tmp;
+        }
         String url=ROOT+"/asset-delivery-api/v1/assetId/"+placeId;
         HttpURLConnection initial=connection(url,s.key,"GET");File tmp=File.createTempFile("place-",".part",directory);
         try {

@@ -144,13 +144,13 @@ final class AvatarMesh {
         return "https://t" + (i & 7) + ".rbxcdn.com/" + hash;
     }
 
-    static AvatarMesh fetch(RobloxApi api, String apiKey, long userId, StringBuilder diag) {
+    static AvatarMesh fetch(RobloxApi api, String apiKey, String cookie, long userId, StringBuilder diag) {
         if (api == null || userId <= 0) return null;
         try {
             String manifestUrl = null;
             String lastState = "none";
             for (int attempt = 0; attempt < 5; attempt++) {
-                JSONObject resp = fetch3dThumbnailJson(api, apiKey, userId);
+                JSONObject resp = fetch3dThumbnailJson(api, apiKey, cookie, userId);
                 if (resp == null) break;
                 lastState = resp.optString("state", "");
                 String url = resp.optString("imageUrl", "");
@@ -219,7 +219,12 @@ final class AvatarMesh {
         }
     }
 
-    private static JSONObject fetch3dThumbnailJson(RobloxApi api, String apiKey, long userId) throws Exception {
+    private static JSONObject fetch3dThumbnailJson(RobloxApi api, String apiKey, String cookie, long userId) throws Exception {
+        if (cookie != null && !cookie.isEmpty()) {
+            try {
+                return api.jsonWithCookie("https://thumbnails.roblox.com/v1/users/avatar-3d?userId=" + userId, cookie);
+            } catch (Throwable ignored) { }
+        }
         // Since March 2026 Roblox requires an Open Cloud API key (thumbnails:read) for avatar-3d
         if (apiKey != null && !apiKey.isEmpty()) {
             try {
