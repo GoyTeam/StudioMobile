@@ -741,7 +741,7 @@ public class EngineCoreTest {
         }
         light = EngineLighting.from(root);
         assertEquals("the disabled light is skipped, so five point lights remain", 6, light.lightCount);
-        assertEquals("only four lights are shaded per frame", EngineLighting.MAX_SHADED_LIGHTS, light.lights.size());
+        assertEquals("candidate lights are preserved for distance sorting", 6, light.lights.size());
     }
 
     @Test public void materialsCarryShadingValues() {
