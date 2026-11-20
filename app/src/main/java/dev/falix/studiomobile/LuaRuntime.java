@@ -348,13 +348,13 @@ final class LuaRuntime {
                 out.append("\n");
                 continue;
             }
-            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*\+=\s*([^;\n]+)", "$1 = $1 + ($2)");
-            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*-=\s*([^;\n]+)", "$1 = $1 - ($2)");
-            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*\*=\s*([^;\n]+)", "$1 = $1 * ($2)");
-            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*/=\s*([^;\n]+)", "$1 = $1 / ($2)");
-            line = line.replaceAll("(\b[A-Za-z_][A-Za-z0-9_\.\[\]]*)\s*\.\.=\s*([^;\n]+)", "$1 = $1 .. ($2)");
-            line = line.replaceAll("(\blocal\s+[A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_][A-Za-z0-9_\.\?]*(\s*=)", "$1$2");
-            line = line.replaceAll("\s*::\s*[A-Za-z_][A-Za-z0-9_\.\?]*", "");
+            line = line.replaceAll("(\\b[A-Za-z_][A-Za-z0-9_.\\[\\]]*)\\s*\\+=\\s*([^;\\n]+)", "$1 = $1 + ($2)");
+            line = line.replaceAll("(\\b[A-Za-z_][A-Za-z0-9_.\\[\\]]*)\\s*-=\\s*([^;\\n]+)", "$1 = $1 - ($2)");
+            line = line.replaceAll("(\\b[A-Za-z_][A-Za-z0-9_.\\[\\]]*)\\s*\\*=\\s*([^;\\n]+)", "$1 = $1 * ($2)");
+            line = line.replaceAll("(\\b[A-Za-z_][A-Za-z0-9_.\\[\\]]*)\\s*/=\\s*([^;\\n]+)", "$1 = $1 / ($2)");
+            line = line.replaceAll("(\\b[A-Za-z_][A-Za-z0-9_.\\[\\]]*)\\s*\\.\\.=\\s*([^;\\n]+)", "$1 = $1 .. ($2)");
+            line = line.replaceAll("(\\blocal\\s+[A-Za-z_][A-Za-z0-9_]*)\\s*:\\s*[A-Za-z_][A-Za-z0-9_.\\?]*(\\s*=)", "$1$2");
+            line = line.replaceAll("\\s*::\\s*[A-Za-z_][A-Za-z0-9_.\\?]*", "");
             out.append(line).append("\n");
         }
         return out.toString();
